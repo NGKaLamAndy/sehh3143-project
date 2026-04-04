@@ -1,0 +1,345 @@
+<!DOCTYPE html>
+<html lang="zh-HK">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>小島料理 管理後台 – 訂單管理</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="js/i18n.js"></script>
+  <script src="js/data.js"></script>
+  <script src="js/store.js"></script>
+</head>
+<body class="bg-[#f5f5f5] font-sans min-h-screen flex flex-col">
+
+  <div id="header-root"></div>
+
+  <main class="flex-1 max-w-7xl w-full mx-auto px-8 py-8">
+    <div class="flex items-center justify-between mb-6">
+      <div class="flex gap-2 bg-gray-200 p-1 rounded-full w-fit" id="tab-bar"></div>
+      <div id="notif-btn"></div>
+    </div>
+    <div id="orders-list"></div>
+  </main>
+
+<script>
+// ===================================================================
+// admin-orders.html  —  Staff Order Management
+// Features: Accept/reject with timeout countdown, refund workflow,
+//           browser notifications for new orders
+// ===================================================================
+
+document.getElementById('header-root').innerHTML = renderAdminHeader('admin-orders.html');
+
+let activeTab = 'active';
+let _prevPendingCount = 0;
+
+const ACTIVE_STATUSES = ['pending', 'accepted', 'cooking', 'delivering', 'ready', 'refund_requested'];
+
+// ───────────────────────────────────────────────────────────────────
+// NOTIFICATIONS
+// ───────────────────────────────────────────────────────────────────
+function initNotifications() {
+  const btn = document.getElementById('notif-btn');
+  if (!('Notification' in window)) { btn.innerHTML = ''; return; }
+  if (Notification.permission === 'granted') {
+    btn.innerHTML = '<span class="text-xs text-green-600 bg-green-50 border border-green-200 px-3 py-2 rounded-lg">🔔 通知已開啟</span>';
+    return;
+  }
+  btn.innerHTML = `
+    <button onclick="enableNotifications()"
+      class="text-xs bg-blue-600 text-white px-4 py-2 rounded-lg hover:bg-blue-700">
+      🔔 開啟訂單通知
+    </button>`;
+}
+
+function enableNotifications() {
+  requestNotificationPermission(function(granted) {
+    initNotifications();
+    if (granted) showNotification('小島料理', '訂單通知已開啟！有新訂單時會即時通知您。', 'notif-enabled');
+  });
+}
+
+// Check for new pending orders and notify
+function checkNewOrders() {
+  const orders = Store.getOrders();
+  const pendingCount = orders.filter(o => o.status === 'pending').length;
+  if (pendingCount > _prevPendingCount && _prevPendingCount >= 0) {
+    showNotification('🔔 新訂單！', '有 ' + (pendingCount - _prevPendingCount) + ' 個新訂單等待接單', 'new-order');
+  }
+  _prevPendingCount = pendingCount;
+}
+
+// ───────────────────────────────────────────────────────────────────
+// RENDER
+// ───────────────────────────────────────────────────────────────────
+function render() {
+  const orders = Store.getOrders();
+  const activeCount = orders.filter(o => ACTIVE_STATUSES.includes(o.status)).length;
+
+  document.getElementById('tab-bar').innerHTML = `
+    <button onclick="setTab('active')"
+      class="px-6 py-2 rounded-full text-sm font-medium transition-colors ${activeTab==='active' ? 'bg-white shadow-sm' : 'text-gray-600 hover:text-black'}">
+      進行中
+      ${activeCount > 0 ? `<span class="ml-2 bg-orange-500 text-white text-xs px-2 py-0.5 rounded-full">${activeCount}</span>` : ''}
+    </button>
+    <button onclick="setTab('completed')"
+      class="px-6 py-2 rounded-full text-sm font-medium transition-colors ${activeTab==='completed' ? 'bg-white shadow-sm' : 'text-gray-600 hover:text-black'}">
+      已完成 / 取消
+    </button>`;
+
+  const filtered = orders.filter(o =>
+    activeTab === 'active'
+      ? ACTIVE_STATUSES.includes(o.status)
+      : ['completed','cancelled','refund_approved','refund_rejected'].includes(o.status)
+  );
+
+  if (filtered.length === 0) {
+    document.getElementById('orders-list').innerHTML = `
+      <div class="text-center text-gray-400 py-20 text-lg">${activeTab === 'active' ? '目前沒有進行中的訂單' : '暫無已完成訂單'}</div>`;
+    return;
+  }
+
+  document.getElementById('orders-list').innerHTML =
+    `<div class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-6">
+       ${filtered.map(order => renderOrderCard(order)).join('')}
+     </div>`;
+}
+
+// ───────────────────────────────────────────────────────────────────
+// ORDER CARD
+// ───────────────────────────────────────────────────────────────────
+function renderOrderCard(order) {
+  const hasDeliveryFee = order.deliveryFee && order.deliveryFee > 0;
+  const subtotal = order.subtotal || (order.totalAmount - (order.deliveryFee || 0));
+  const secsLeft = Store.getOrderSecondsLeft(order);
+
+  const badgeClass = {
+    pending:          'bg-yellow-100 text-yellow-700',
+    accepted:         'bg-blue-100 text-blue-700',
+    cooking:          'bg-orange-100 text-orange-700',
+    delivering:       'bg-purple-100 text-purple-700',
+    ready:            'bg-green-100 text-green-700',
+    completed:        'bg-gray-100 text-gray-600',
+    cancelled:        'bg-red-100 text-red-600',
+    refund_requested: 'bg-pink-100 text-pink-700',
+    refund_approved:  'bg-teal-100 text-teal-700',
+    refund_rejected:  'bg-gray-100 text-gray-500',
+  }[order.status] || 'bg-gray-100 text-gray-600';
+
+  // ── Countdown timer for pending orders ──
+  let countdownHtml = '';
+  if (order.status === 'pending' && secsLeft !== null) {
+    const mins = Math.floor(Math.abs(secsLeft) / 60);
+    const secs = Math.abs(secsLeft) % 60;
+    const expired = secsLeft < 0;
+    const urgentClass = expired ? 'bg-red-100 text-red-700 border border-red-200' :
+                        secsLeft < 120 ? 'bg-red-50 text-red-600' :
+                        secsLeft < 300 ? 'bg-yellow-50 text-yellow-600' : 'bg-gray-50 text-gray-500';
+    countdownHtml = `
+      <div class="flex items-center gap-2 px-3 py-2 rounded-lg text-sm font-medium ${urgentClass}">
+        <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"></circle><polyline points="12 6 12 12 16 14"></polyline></svg>
+        ${expired ? '⚠️ 已逾時 ' + mins + ':' + String(secs).padStart(2,'0') : '接單剩餘 ' + mins + ':' + String(secs).padStart(2,'0')}
+      </div>`;
+  }
+
+  // ── Action buttons ──
+  const actionButtons = renderActionButtons(order);
+
+  // ── Refund section ──
+  const refundHtml = order.status === 'refund_requested' ? `
+    <div class="bg-pink-50 border border-pink-200 rounded-xl p-4 space-y-2">
+      <div class="text-sm font-bold text-pink-700">申請退款中</div>
+      ${order.refundReason ? `<div class="text-xs text-pink-600">原因：${htmlEscape(order.refundReason)}</div>` : ''}
+      <div class="flex gap-2 mt-2">
+        <button onclick="approveRefund('${order.id}')"
+          class="flex-1 bg-green-500 text-white py-2 rounded-lg text-sm font-medium hover:bg-green-600">
+          ✓ 批准退款
+        </button>
+        <button onclick="promptRejectRefund('${order.id}')"
+          class="flex-1 bg-red-50 text-red-500 border border-red-200 py-2 rounded-lg text-sm font-medium hover:bg-red-100">
+          ✕ 拒絕退款
+        </button>
+      </div>
+    </div>` : '';
+
+  // ── Delivery details ──
+  const deliveryDetails = order.deliveryMethod === 'delivery' ? `
+    <div class="text-gray-500 text-xs space-y-0.5">
+      ${order.deliveryBuilding ? `<div>📍 ${htmlEscape(order.deliveryBuilding)}</div>` : (order.deliveryAddress ? `<div>📍 ${htmlEscape(order.deliveryAddress)}</div>` : '')}
+      ${order.deliveryFloorUnit ? `<div>🏠 ${htmlEscape(order.deliveryFloorUnit)}${order.deliveryDoorCode ? '  🔑 ' + htmlEscape(order.deliveryDoorCode) : ''}</div>` : ''}
+      ${(order.deliveryContactName && order.deliveryContactName !== order.customerInfo.name) ? `<div>👤 ${htmlEscape(order.deliveryContactName)} · ${htmlEscape(order.deliveryContactPhone || '')}</div>` : ''}
+      ${order.deliveryZoneName ? `<div class="text-gray-400">${htmlEscape(order.deliveryZoneName)}${order.deliveryDistance != null ? ' · 約'+order.deliveryDistance+'km' : ''}</div>` : ''}
+    </div>` : '';
+
+  return `
+  <div class="bg-white rounded-2xl border border-gray-200 p-6 flex flex-col gap-4 shadow-sm">
+
+    <div class="flex justify-between items-start">
+      <div>
+        <div class="text-lg font-bold">#${order.id}</div>
+        <div class="text-xs text-gray-400 mt-0.5">${new Date(order.createdAt).toLocaleTimeString()}</div>
+      </div>
+      <span class="px-3 py-1 rounded-full text-xs font-bold ${badgeClass}">${getStatusText(order.status)}</span>
+    </div>
+
+    ${countdownHtml}
+
+    <div class="bg-gray-50 rounded-xl p-4 space-y-1.5 text-sm">
+      <div class="font-medium text-gray-700">${htmlEscape(order.customerInfo.name)}</div>
+      <div class="text-gray-500 flex items-center gap-1">
+        <svg xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07A19.5 19.5 0 0 1 4.69 13.4a19.79 19.79 0 0 1-3.07-8.67A2 2 0 0 1 3.6 2.69h3a2 2 0 0 1 2 1.72 12.84 12.84 0 0 0 .7 2.81 2 2 0 0 1-.45 2.11L8.09 9.91a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45 12.84 12.84 0 0 0 2.81.7A2 2 0 0 1 22 16.92z"></path></svg>
+        ${htmlEscape(order.customerInfo.phone)}
+      </div>
+      <div class="text-gray-500">${order.deliveryMethod === 'pickup' ? '🏠 自取' : '🛵 外送'}</div>
+      ${deliveryDetails}
+      <div class="text-gray-500">⏰ ${order.deliveryMethod === 'pickup' ? '取餐' : '送達'}：${htmlEscape(order.pickupTime)}</div>
+    </div>
+
+    <div class="space-y-1.5 text-sm">
+      ${order.items.map(item => `
+        <div class="flex justify-between">
+          <span class="text-gray-700">${htmlEscape(item.menuItem.name)} × ${item.quantity}</span>
+          <span class="font-medium">$${item.totalPrice}</span>
+        </div>
+        ${item.specialInstructions ? `<div class="text-orange-500 text-xs">備註: ${htmlEscape(item.specialInstructions)}</div>` : ''}`).join('')}
+      <div class="border-t border-gray-100 pt-2 mt-2 space-y-1">
+        ${hasDeliveryFee ? `<div class="flex justify-between text-gray-500 text-xs"><span>小計</span><span>$${subtotal}</span></div>
+        <div class="flex justify-between text-gray-500 text-xs"><span>外送費</span><span>$${order.deliveryFee}</span></div>` : ''}
+        ${order.discountAmount > 0 ? `<div class="flex justify-between text-green-600 text-xs"><span>折扣 (${htmlEscape(order.discountCode||'')})</span><span>-$${order.discountAmount}</span></div>` : ''}
+        ${order.tipAmount > 0 ? `<div class="flex justify-between text-gray-500 text-xs"><span>小費</span><span>$${order.tipAmount}</span></div>` : ''}
+        <div class="flex justify-between font-bold"><span>合計</span><span>$${order.totalAmount}</span></div>
+      </div>
+    </div>
+
+    ${refundHtml}
+
+    ${actionButtons}
+
+    ${order.refundNote ? `<div class="text-xs text-gray-400 bg-gray-50 rounded-lg p-2">退款備注：${htmlEscape(order.refundNote)}</div>` : ''}
+
+  </div>`;
+}
+
+// ───────────────────────────────────────────────────────────────────
+// ACTION BUTTONS
+// ───────────────────────────────────────────────────────────────────
+function renderActionButtons(order) {
+  const secsLeft = Store.getOrderSecondsLeft(order);
+  const isExpired = secsLeft !== null && secsLeft < 0;
+
+  if (order.status === 'pending') {
+    return `
+      <div class="flex gap-2">
+        <button onclick="acceptOrder('${order.id}')"
+          class="flex-1 bg-orange-500 text-white py-3 rounded-xl text-sm font-medium hover:bg-orange-600 transition-colors">
+          ✓ 接單
+        </button>
+        <button onclick="promptRejectOrder('${order.id}')"
+          class="bg-red-50 text-red-500 border border-red-200 px-4 py-3 rounded-xl text-sm font-medium hover:bg-red-100 transition-colors">
+          ✕ 拒絕
+        </button>
+      </div>`;
+  }
+
+  const nextStatus = getNextStatus(order);
+  const actionText = getActionText(order);
+
+  if (!actionText) return '';
+
+  return `
+    <div class="flex gap-2">
+      <button onclick="advanceOrder('${order.id}', '${nextStatus}')"
+        class="flex-1 bg-orange-500 text-white py-3 rounded-xl text-sm font-medium hover:bg-orange-600 transition-colors">
+        ${actionText}
+      </button>
+    </div>`;
+}
+
+function getNextStatus(order) {
+  const map = {
+    accepted: 'cooking',
+    cooking: order.deliveryMethod === 'delivery' ? 'delivering' : 'ready',
+    delivering: 'completed',
+    ready: 'completed',
+  };
+  return map[order.status] || null;
+}
+
+function getActionText(order) {
+  const map = {
+    accepted: '開始製作',
+    cooking: order.deliveryMethod === 'delivery' ? '出貨 (送遞)' : '準備完成 (可取餐)',
+    delivering: '完成訂單',
+    ready: '完成訂單',
+  };
+  return map[order.status] || '';
+}
+
+// ───────────────────────────────────────────────────────────────────
+// ORDER ACTIONS
+// ───────────────────────────────────────────────────────────────────
+function acceptOrder(orderId) {
+  Store.updateOrderStatus(orderId, 'accepted');
+  showNotification('訂單已接單', '訂單 #' + orderId + ' 已接單，開始製作！', 'accepted-' + orderId);
+  render();
+}
+
+function promptRejectOrder(orderId) {
+  const reason = prompt('拒絕原因（選填）：');
+  if (reason === null) return; // user cancelled the prompt
+  const orders = Store.getOrders().map(o => {
+    if (o.id !== orderId) return o;
+    return Object.assign({}, o, { status: 'cancelled', cancelReason: reason || '' });
+  });
+  localStorage.setItem('mojima_orders', JSON.stringify(orders));
+  showNotification('訂單已拒絕', '訂單 #' + orderId + ' 已拒絕。', 'rejected-' + orderId);
+  render();
+}
+
+function advanceOrder(orderId, nextStatus) {
+  Store.updateOrderStatus(orderId, nextStatus);
+  render();
+}
+
+// ───────────────────────────────────────────────────────────────────
+// REFUND WORKFLOW
+// ───────────────────────────────────────────────────────────────────
+function approveRefund(orderId) {
+  if (!confirm('確定批准此退款申請？')) return;
+  const note = prompt('退款備注（選填，如：已退回原付款方式）：') || '';
+  const orders = Store.getOrders().map(o => {
+    if (o.id !== orderId) return o;
+    return Object.assign({}, o, { status: 'refund_approved', refundNote: note });
+  });
+  localStorage.setItem('mojima_orders', JSON.stringify(orders));
+  showNotification('退款已批准', '訂單 #' + orderId + ' 的退款已批准。', 'refund-approved-' + orderId);
+  render();
+}
+
+function promptRejectRefund(orderId) {
+  const reason = prompt('拒絕退款的原因：');
+  if (reason === null) return;
+  const orders = Store.getOrders().map(o => {
+    if (o.id !== orderId) return o;
+    return Object.assign({}, o, { status: 'refund_rejected', refundNote: reason || '' });
+  });
+  localStorage.setItem('mojima_orders', JSON.stringify(orders));
+  render();
+}
+
+function setTab(tab) { activeTab = tab; render(); }
+
+// ───────────────────────────────────────────────────────────────────
+// BOOT + POLLING
+// ───────────────────────────────────────────────────────────────────
+initNotifications();
+render();
+
+// Re-render every 10 seconds (countdown timers + new order detection)
+setInterval(function() {
+  checkNewOrders();
+  render();
+}, 10000);
+</script>
+</body>
+</html>

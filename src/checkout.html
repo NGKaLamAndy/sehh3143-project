@@ -1,0 +1,603 @@
+<!DOCTYPE html>
+<html lang="zh-HK">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>小島料理 – 結帳</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="js/i18n.js"></script>
+  <script src="js/data.js"></script>
+  <script src="js/store.js"></script>
+</head>
+<body class="bg-[#f9f9f9] font-sans">
+
+  <div id="header-root"></div>
+
+  <main class="max-w-3xl mx-auto px-8 py-8">
+    <h1 class="text-2xl font-bold mb-8" id="page-title">確認訂單</h1>
+    <div id="page-content"></div>
+  </main>
+
+<script>
+// ===================================================================
+// checkout.html  —  Order Form Page (with tip, discount, full address)
+// ===================================================================
+
+document.getElementById('header-root').innerHTML = renderHeader();
+document.getElementById('page-title').textContent = t('confirmOrder');
+
+// Form data object
+const form = {
+  name: '', phone: '', email: '',
+  deliveryMethod: 'pickup',
+  // Structured delivery address
+  building: '', floorUnit: '', doorCode: '',
+  contactName: '', contactPhone: '',
+  // Legacy combined address (auto-built)
+  deliveryAddress: '',
+  deliveryLat: null, deliveryLng: null,
+  deliveryFee: 0, deliveryZoneName: '', deliveryDistance: null,
+  pickupTime: 'ASAP',
+  paymentMethod: 'online',
+  notes: '',
+  // Tip
+  tipAmount: 0,
+  tipMode: 'none',    // 'none' | '5' | '10' | '20' | 'custom'
+  tipCustom: '',
+  // Discount
+  discountCode: '',
+  discountAmount: 0,
+  discountLabel: '',
+};
+
+let geoStatus = '';
+let geoMessage = '';
+let addressCheckResult = null;
+let discountMessage = '';
+let discountError = '';
+
+function render() {
+  const cart     = Store.getCart();
+  window._checkoutCart = cart;
+  const subtotal = Store.getCartTotal();
+  const isOpen   = Store.isStoreOpen();
+  const ds       = Store.getDeliverySettings();
+
+  if (!isOpen) {
+    document.getElementById('page-content').innerHTML = `
+      <div class="text-center py-20">
+        <h2 class="text-2xl font-bold mb-4">${t('storeClosedMsg')}</h2>
+        <p class="text-gray-500 mb-6">${t('storeClosedSub')}</p>
+        <a href="menu.html" class="text-orange-600 hover:underline">${t('backToMenu')}</a>
+      </div>`;
+    return;
+  }
+
+  if (cart.length === 0) {
+    document.getElementById('page-content').innerHTML = `
+      <div class="text-center py-20">
+        <h2 class="text-2xl font-bold mb-4">${t('emptyCart')}</h2>
+        <a href="menu.html" class="text-orange-600 hover:underline">${t('backToMenu')}</a>
+      </div>`;
+    return;
+  }
+
+  // Compute totals
+  const deliveryFee  = form.deliveryMethod === 'delivery' ? form.deliveryFee : 0;
+  const tipAmt       = form.tipMode === 'custom'
+    ? (parseInt(form.tipCustom, 10) || 0)
+    : (form.tipMode === 'none' ? 0 : parseInt(form.tipMode, 10));
+  form.tipAmount = tipAmt;
+  const discount     = form.discountAmount || 0;
+  const grandTotal   = Math.max(0, subtotal + deliveryFee - discount + tipAmt);
+
+  // ── Delivery address fields ──────────────────────────────────────
+  let deliveryFieldsHtml = '';
+  if (form.deliveryMethod === 'delivery') {
+    const zoneInfoHtml = ds.zones.map(z =>
+      `<span class="inline-flex items-center gap-1 text-xs bg-gray-100 px-2 py-1 rounded-full">
+        <span class="w-2 h-2 rounded-full ${z.fee === 0 ? 'bg-green-400' : z.fee <= 15 ? 'bg-yellow-400' : 'bg-orange-400'}"></span>
+        ${z.name} ${z.label}
+      </span>`).join(' ');
+
+    let geoStatusHtml = '';
+    if (geoStatus === 'loading') {
+      geoStatusHtml = `<div class="flex items-center gap-2 text-blue-600 text-sm mt-2">
+        <svg class="animate-spin h-4 w-4" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4" fill="none"></circle><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"></path></svg>正在取得您的位置...
+      </div>`;
+    } else if (geoStatus === 'success') {
+      geoStatusHtml = `<div class="bg-green-50 border border-green-200 rounded-xl p-3 mt-2 text-green-700 text-sm font-medium flex items-center gap-2">✓ ${htmlEscape(geoMessage)}${form.deliveryDistance != null ? ' · 約' + form.deliveryDistance + 'km · 運費 $' + form.deliveryFee : ''}</div>`;
+    } else if (geoStatus === 'error' || geoStatus === 'out-of-range') {
+      geoStatusHtml = `<div class="bg-red-50 border border-red-200 rounded-xl p-3 mt-2 text-red-600 text-sm">${htmlEscape(geoMessage)}</div>`;
+    }
+
+    let addrCheckHtml = '';
+    if (addressCheckResult) {
+      if (addressCheckResult.allowed) {
+        addrCheckHtml = `<div class="bg-green-50 border border-green-200 rounded-xl p-3 mt-2 text-green-700 text-sm">✓ 地址在配送範圍內 (${htmlEscape(addressCheckResult.district)}) · ${htmlEscape(addressCheckResult.zoneName)} · 運費 $${addressCheckResult.fee}</div>`;
+      } else {
+        addrCheckHtml = `<div class="bg-red-50 border border-red-200 rounded-xl p-3 mt-2 text-red-600 text-sm">${htmlEscape(addressCheckResult.reason)}</div>`;
+      }
+    }
+
+    let minOrderHtml = '';
+    if (ds.minDeliveryAmount && subtotal < ds.minDeliveryAmount) {
+      minOrderHtml = `<div class="bg-yellow-50 border border-yellow-200 rounded-xl p-3 mt-3 text-yellow-700 text-sm">外送最低消費 $${ds.minDeliveryAmount}，目前小計 $${subtotal}，還差 $${ds.minDeliveryAmount - subtotal}。</div>`;
+    }
+
+    deliveryFieldsHtml = `
+      <div class="bg-gray-50 rounded-xl p-4 mb-4">
+        <div class="text-sm font-medium text-gray-700 mb-2">外送範圍 (${ds.restaurantAddress}出發，${ds.maxDeliveryKm}km內)</div>
+        <div class="flex flex-wrap gap-2">${zoneInfoHtml}</div>
+      </div>
+      <div class="space-y-3">
+        <div>
+          <label class="block text-sm text-gray-600 mb-1">${t('buildingLabel')}</label>
+          <div class="flex gap-2">
+            <input type="text" id="f-building" value="${htmlEscape(form.building)}" oninput="onBuildingInput(this.value)"
+              placeholder="例如：旺角彌敦道688號麗都大廈"
+              class="flex-1 border border-gray-200 rounded-xl px-4 py-3 focus:outline-none focus:ring-2 focus:ring-orange-500" />
+            <button type="button" onclick="useGeolocation()"
+              class="shrink-0 bg-blue-600 text-white px-4 py-3 rounded-xl hover:bg-blue-700 text-sm font-medium flex items-center gap-1" ${geoStatus === 'loading' ? 'disabled' : ''}>
+              <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"></circle><circle cx="12" cy="12" r="3"></circle><line x1="12" y1="2" x2="12" y2="6"></line><line x1="12" y1="18" x2="12" y2="22"></line><line x1="2" y1="12" x2="6" y2="12"></line><line x1="18" y1="12" x2="22" y2="12"></line></svg>
+              定位
+            </button>
+          </div>
+          ${geoStatusHtml}
+          ${addrCheckHtml}
+          ${minOrderHtml}
+        </div>
+        <div class="grid grid-cols-2 gap-3">
+          <div>
+            <label class="block text-sm text-gray-600 mb-1">${t('floorUnitLabel')}</label>
+            <input type="text" id="f-floor" value="${htmlEscape(form.floorUnit)}" oninput="form.floorUnit=this.value"
+              placeholder="例如：15樓 B室"
+              class="w-full border border-gray-200 rounded-xl px-4 py-3 focus:outline-none focus:ring-2 focus:ring-orange-500" />
+          </div>
+          <div>
+            <label class="block text-sm text-gray-600 mb-1">${t('doorCodeLabel')}</label>
+            <input type="text" id="f-doorcode" value="${htmlEscape(form.doorCode)}" oninput="form.doorCode=this.value"
+              placeholder="例如：#1234"
+              class="w-full border border-gray-200 rounded-xl px-4 py-3 focus:outline-none focus:ring-2 focus:ring-orange-500" />
+          </div>
+        </div>
+        <div class="grid grid-cols-2 gap-3">
+          <div>
+            <label class="block text-sm text-gray-600 mb-1">${t('contactNameLabel')}</label>
+            <input type="text" id="f-cname" value="${htmlEscape(form.contactName)}" oninput="form.contactName=this.value"
+              class="w-full border border-gray-200 rounded-xl px-4 py-3 focus:outline-none focus:ring-2 focus:ring-orange-500" />
+          </div>
+          <div>
+            <label class="block text-sm text-gray-600 mb-1">${t('contactPhoneLabel')}</label>
+            <input type="tel" id="f-cphone" value="${htmlEscape(form.contactPhone)}"
+              inputmode="numeric" pattern="[0-9]*"
+              oninput="this.value=this.value.replace(/[^0-9]/g,''); form.contactPhone=this.value"
+              class="w-full border border-gray-200 rounded-xl px-4 py-3 focus:outline-none focus:ring-2 focus:ring-orange-500" />
+          </div>
+        </div>
+      </div>
+      ${form.deliveryFee > 0
+        ? `<div class="flex justify-between items-center bg-blue-50 rounded-xl p-3 mt-3 text-sm"><span class="text-blue-700 font-medium">${t('deliveryFeeLabel')}</span><span class="text-blue-700 font-bold">+$${form.deliveryFee}</span></div>`
+        : (form.deliveryMethod === 'delivery' && (geoStatus === 'success' || (addressCheckResult && addressCheckResult.allowed)))
+          ? `<div class="flex justify-between items-center bg-green-50 rounded-xl p-3 mt-3 text-sm"><span class="text-green-700 font-medium">${t('deliveryFeeLabel')}</span><span class="text-green-700 font-bold">${t('freeDelivery')}</span></div>`
+          : ''}`;
+  }
+
+  // ── Tip section ──────────────────────────────────────────────────
+  const tipOptions = [
+    { mode: 'none', label: t('tipNoTip'), val: 0 },
+    { mode: '5',    label: '$5',         val: 5  },
+    { mode: '10',   label: '$10',        val: 10 },
+    { mode: '20',   label: '$20',        val: 20 },
+    { mode: 'custom', label: t('tipCustom'), val: null },
+  ];
+  const tipHtml = `
+    <div class="bg-white p-8 rounded-2xl shadow-sm border border-gray-100">
+      <h2 class="text-lg font-bold mb-4">${t('tipLabel')}</h2>
+      <div class="flex flex-wrap gap-2 mb-3">
+        ${tipOptions.map(opt => `
+          <button type="button" onclick="setTip('${opt.mode}')"
+            class="px-4 py-2 rounded-xl text-sm font-medium border-2 transition-colors ${form.tipMode === opt.mode ? 'border-orange-500 bg-orange-50 text-orange-700' : 'border-gray-200 text-gray-600 hover:border-gray-300'}">
+            ${opt.label}
+          </button>`).join('')}
+      </div>
+      ${form.tipMode === 'custom' ? `
+        <div class="flex items-center gap-2">
+          <span class="text-gray-600 text-sm">$</span>
+          <input type="number" id="tip-custom-input" value="${form.tipCustom}" min="0"
+            oninput="form.tipCustom=this.value; render();"
+            class="w-28 border border-gray-200 rounded-xl px-4 py-2 focus:outline-none focus:ring-2 focus:ring-orange-500 text-sm" placeholder="0" autofocus />
+        </div>` : ''}
+    </div>`;
+
+  // ── Discount code section ────────────────────────────────────────
+  const discountHtml = `
+    <div class="bg-white p-8 rounded-2xl shadow-sm border border-gray-100">
+      <h2 class="text-lg font-bold mb-4">${t('discountCode')}</h2>
+      <div class="flex gap-2">
+        <input type="text" id="f-discount" value="${htmlEscape(form.discountCode)}"
+          oninput="form.discountCode=this.value; form.discountAmount=0; form.discountLabel=''; discountMessage=''; discountError=''; renderDiscountFeedback();"
+          placeholder="輸入折扣碼"
+          class="flex-1 border border-gray-200 rounded-xl px-4 py-3 focus:outline-none focus:ring-2 focus:ring-orange-500" />
+        <button type="button" onclick="applyDiscount()"
+          class="bg-gray-800 text-white px-5 py-3 rounded-xl hover:bg-black text-sm font-medium">
+          ${t('applyDiscount')}
+        </button>
+      </div>
+      <div id="discount-feedback"></div>
+    </div>`;
+
+  document.getElementById('page-content').innerHTML = `
+    <form id="checkout-form" class="space-y-8" onsubmit="handleSubmit(event)">
+
+      <div id="error-box" class="hidden bg-red-50 text-red-600 p-4 rounded-xl border border-red-100 font-medium"></div>
+
+      <!-- Order Summary -->
+      <div class="bg-white p-8 rounded-2xl shadow-sm border border-gray-100">
+        <h2 class="text-lg font-bold mb-6">${t('yourOrder')}</h2>
+        <div class="space-y-4">
+          ${cart.map((item, index) => `
+            <div class="flex justify-between items-start text-sm">
+              <div class="flex-1">
+                <div class="flex items-center gap-2">
+                  <span class="font-medium">${htmlEscape(item.menuItem.name)}</span>
+                  <span class="text-gray-400">× ${item.quantity}</span>
+                </div>
+                ${Object.entries(item.selectedCustomizations || {}).map(([cId, chId]) => {
+                  const cust = (item.menuItem.customizations||[]).find(c => c.id === cId);
+                  const choice = (cust ? cust.choices : []).find(c => c.id === chId);
+                  return cust && choice ? `<div class="text-gray-400 text-xs">${htmlEscape(cust.name)}: ${htmlEscape(choice.name)}</div>` : '';
+                }).join('')}
+                ${item.specialInstructions ? `<div class="text-orange-600 text-xs mt-1">備註: ${htmlEscape(item.specialInstructions)}</div>` : ''}
+              </div>
+              <div class="flex items-center gap-4 ml-4">
+                <span class="font-medium">$${item.totalPrice}</span>
+                <button type="button" onclick="removeItem(${index})" class="text-red-400 hover:text-red-600 text-lg leading-none">×</button>
+              </div>
+            </div>`).join('')}
+        </div>
+        <div class="border-t border-gray-100 mt-6 pt-6 space-y-2">
+          <div class="flex justify-between items-center text-sm text-gray-600">
+            <span>${t('subtotal')}</span><span>$${subtotal}</span>
+          </div>
+          ${deliveryFee > 0 ? `
+          <div class="flex justify-between items-center text-sm text-gray-600">
+            <span>${t('deliveryFeeLabel')}</span><span>$${deliveryFee}</span>
+          </div>` : ''}
+          ${discount > 0 ? `
+          <div class="flex justify-between items-center text-sm text-green-600">
+            <span>${t('discountLabel')} (${htmlEscape(form.discountLabel)})</span><span>-$${discount}</span>
+          </div>` : ''}
+          ${tipAmt > 0 ? `
+          <div class="flex justify-between items-center text-sm text-gray-600">
+            <span>${t('tipLabel')}</span><span>$${tipAmt}</span>
+          </div>` : ''}
+          <div class="flex justify-between items-center font-bold text-lg pt-2 border-t border-gray-50">
+            <span>${t('grandTotal')}</span>
+            <div class="flex items-center gap-4">
+              <button type="button" onclick="clearCart()" class="text-xs font-normal text-gray-400 hover:text-red-500 underline">${t('clearCart')}</button>
+              <span>$${grandTotal}</span>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Discount Code -->
+      ${discountHtml}
+
+      <!-- Tip -->
+      ${tipHtml}
+
+      <!-- Contact Info -->
+      <div class="bg-white p-8 rounded-2xl shadow-sm border border-gray-100">
+        <h2 class="text-lg font-bold mb-6">${t('contactInfo')}</h2>
+        <div class="space-y-4">
+          <div>
+            <label class="block text-sm text-gray-600 mb-1">${t('nameLabel')}</label>
+            <input type="text" id="f-name" value="${htmlEscape(form.name)}" oninput="form.name=this.value"
+              class="w-full border border-gray-200 rounded-xl px-4 py-3 focus:outline-none focus:ring-2 focus:ring-orange-500" required />
+          </div>
+          <div>
+            <label class="block text-sm text-gray-600 mb-1">${t('phoneLabel')}</label>
+            <input type="tel" id="f-phone" value="${htmlEscape(form.phone)}"
+              inputmode="numeric" pattern="[0-9]*"
+              oninput="this.value=this.value.replace(/[^0-9]/g,''); form.phone=this.value"
+              class="w-full border border-gray-200 rounded-xl px-4 py-3 focus:outline-none focus:ring-2 focus:ring-orange-500" required />
+          </div>
+          <div>
+            <label class="block text-sm text-gray-600 mb-1">${t('emailLabel')}</label>
+            <input type="email" id="f-email" value="${htmlEscape(form.email)}" oninput="form.email=this.value"
+              class="w-full border border-gray-200 rounded-xl px-4 py-3 focus:outline-none focus:ring-2 focus:ring-orange-500" />
+          </div>
+        </div>
+      </div>
+
+      <!-- Delivery Method -->
+      <div class="bg-white p-8 rounded-2xl shadow-sm border border-gray-100">
+        <h2 class="text-lg font-bold mb-6">${t('pickupMethod')}</h2>
+        <div class="grid grid-cols-2 gap-4 mb-4">
+          <label class="flex items-center gap-3 p-4 border-2 rounded-xl cursor-pointer ${form.deliveryMethod==='pickup' ? 'border-black bg-gray-50' : 'border-gray-200'}" onclick="setDeliveryMethod('pickup')">
+            <input type="radio" name="deliveryMethod" value="pickup" ${form.deliveryMethod==='pickup'?'checked':''} class="accent-black" readonly />
+            <div><div class="font-medium">${t('pickup')}</div><div class="text-sm text-gray-500">來店取餐</div></div>
+          </label>
+          <label class="flex items-center gap-3 p-4 border-2 rounded-xl cursor-pointer ${form.deliveryMethod==='delivery' ? 'border-black bg-gray-50' : 'border-gray-200'} ${!ds.deliveryEnabled ? 'opacity-50 cursor-not-allowed' : ''}" onclick="${ds.deliveryEnabled ? "setDeliveryMethod('delivery')" : ''}">
+            <input type="radio" name="deliveryMethod" value="delivery" ${form.deliveryMethod==='delivery'?'checked':''} ${!ds.deliveryEnabled ? 'disabled' : ''} class="accent-black" readonly />
+            <div>
+              <div class="font-medium">${t('delivery')}</div>
+              <div class="text-sm text-gray-500">${ds.deliveryEnabled ? '送到府上' : '外送暫停'}</div>
+            </div>
+          </label>
+        </div>
+        ${deliveryFieldsHtml}
+        <div class="mt-4">
+          <label class="block text-sm text-gray-600 mb-1">${form.deliveryMethod === 'pickup' ? t('pickupTime') : t('estimatedDelivery')}</label>
+          <select onchange="form.pickupTime=this.value"
+            class="w-full border border-gray-200 rounded-xl px-4 py-3 focus:outline-none focus:ring-2 focus:ring-orange-500">
+            <option value="ASAP" ${form.pickupTime==='ASAP'?'selected':''}>${t('asap')}</option>
+            <option value="30分鐘後" ${form.pickupTime==='30分鐘後'?'selected':''}>${t('min30')}</option>
+            <option value="45分鐘後" ${form.pickupTime==='45分鐘後'?'selected':''}>${t('min45')}</option>
+            <option value="1小時後" ${form.pickupTime==='1小時後'?'selected':''}>${t('hour1')}</option>
+          </select>
+        </div>
+      </div>
+
+      <!-- Payment Method -->
+      <div class="bg-white p-8 rounded-2xl shadow-sm border border-gray-100">
+        <h2 class="text-lg font-bold mb-6">${t('paymentMethod')}</h2>
+        <div class="flex items-center gap-3 p-4 border-2 border-black bg-gray-50 rounded-xl">
+          <input type="radio" name="paymentMethod" value="online" checked class="accent-black" readonly />
+          <div class="font-medium">${t('onlinePayment')}</div>
+        </div>
+      </div>
+
+      <!-- Notes -->
+      <div class="bg-white p-8 rounded-2xl shadow-sm border border-gray-100">
+        <h2 class="text-lg font-bold mb-4">${t('notesLabel')}</h2>
+        <textarea oninput="form.notes=this.value" placeholder="${t('notesPlaceholder')}"
+          class="w-full border border-gray-200 rounded-xl p-4 focus:outline-none focus:ring-2 focus:ring-orange-500 resize-none h-24">${htmlEscape(form.notes)}</textarea>
+      </div>
+
+      <!-- Submit -->
+      <button type="submit"
+        class="w-full bg-orange-500 text-white py-5 rounded-xl font-bold text-lg hover:bg-orange-600 transition-colors shadow-lg">
+        ${t('submitOrder')} · $${grandTotal}
+      </button>
+
+    </form>`;
+
+  // Re-render discount feedback after DOM update
+  renderDiscountFeedback();
+}
+
+// -----------------------------------------------------------------
+// TIP
+// -----------------------------------------------------------------
+function setTip(mode) {
+  form.tipMode = mode;
+  if (mode !== 'custom') form.tipCustom = '';
+  render();
+}
+
+// -----------------------------------------------------------------
+// DISCOUNT CODE
+// -----------------------------------------------------------------
+function applyDiscount() {
+  const code = (document.getElementById('f-discount') || {}).value || form.discountCode;
+  form.discountCode = code.trim();
+  if (!form.discountCode) { discountError = '請輸入折扣碼'; discountMessage = ''; renderDiscountFeedback(); return; }
+  const subtotal = Store.getCartTotal();
+  const result = Store.applyDiscountCode(form.discountCode, subtotal);
+  if (result.valid) {
+    form.discountAmount = result.discount;
+    form.discountLabel  = result.label;
+    discountMessage = t('discountApplied') + ' (-$' + result.discount + ')';
+    discountError   = '';
+  } else {
+    form.discountAmount = 0;
+    form.discountLabel  = '';
+    discountMessage = '';
+    discountError   = t('invalidDiscountCode');
+  }
+  render();
+}
+
+function renderDiscountFeedback() {
+  const el = document.getElementById('discount-feedback');
+  if (!el) return;
+  if (discountMessage) {
+    el.innerHTML = `<div class="mt-2 text-green-600 text-sm font-medium">✓ ${htmlEscape(discountMessage)}</div>`;
+  } else if (discountError) {
+    el.innerHTML = `<div class="mt-2 text-red-500 text-sm">${htmlEscape(discountError)}</div>`;
+  } else {
+    el.innerHTML = '';
+  }
+}
+
+// -----------------------------------------------------------------
+// DELIVERY METHOD TOGGLE
+// -----------------------------------------------------------------
+function setDeliveryMethod(method) {
+  form.deliveryMethod = method;
+  if (method === 'pickup') {
+    form.deliveryFee = 0; form.deliveryLat = null; form.deliveryLng = null;
+    form.deliveryDistance = null; form.deliveryZoneName = '';
+    geoStatus = ''; geoMessage = ''; addressCheckResult = null;
+  }
+  render();
+}
+
+// -----------------------------------------------------------------
+// ADDRESS INPUT — real-time district check
+// -----------------------------------------------------------------
+let _addrDebounce = null;
+function onBuildingInput(value) {
+  form.building = value;
+  if (geoStatus === 'success' || geoStatus === 'out-of-range') {
+    geoStatus = ''; geoMessage = '';
+    form.deliveryLat = null; form.deliveryLng = null; form.deliveryDistance = null;
+  }
+  clearTimeout(_addrDebounce);
+  _addrDebounce = setTimeout(function() {
+    if (value.trim().length >= 2) {
+      addressCheckResult = checkAddressDistrict(value);
+      if (addressCheckResult.allowed) {
+        form.deliveryFee = addressCheckResult.fee;
+        form.deliveryZoneName = addressCheckResult.zoneName || '';
+      } else {
+        form.deliveryFee = 0;
+      }
+      render();
+      const el = document.getElementById('f-building');
+      if (el) { el.focus(); el.setSelectionRange(el.value.length, el.value.length); }
+    } else {
+      addressCheckResult = null;
+      form.deliveryFee = 0;
+    }
+  }, 400);
+}
+
+// -----------------------------------------------------------------
+// GEOLOCATION
+// -----------------------------------------------------------------
+function useGeolocation() {
+  if (!navigator.geolocation) {
+    geoStatus = 'error'; geoMessage = '您的瀏覽器不支援定位功能，請手動輸入地址。'; render(); return;
+  }
+  geoStatus = 'loading'; geoMessage = ''; addressCheckResult = null; render();
+  navigator.geolocation.getCurrentPosition(
+    function(position) {
+      const lat = position.coords.latitude;
+      const lng = position.coords.longitude;
+      const result = getDeliveryZone(lat, lng);
+      if (result.error) {
+        geoStatus = 'out-of-range'; geoMessage = result.error;
+        form.deliveryFee = 0; form.deliveryLat = lat; form.deliveryLng = lng; form.deliveryDistance = result.distance;
+      } else {
+        geoStatus = 'success'; geoMessage = '已定位成功！區域: ' + result.zone.name;
+        form.deliveryFee = result.fee; form.deliveryLat = lat; form.deliveryLng = lng;
+        form.deliveryDistance = result.distance; form.deliveryZoneName = result.zone.name;
+        if (!form.building.trim()) form.building = '(GPS定位) 約' + result.distance + 'km — 請補充詳細地址';
+      }
+      render();
+    },
+    function(error) {
+      geoStatus = 'error';
+      const msgs = {
+        [error.PERMISSION_DENIED]: '定位權限被拒絕，請在瀏覽器設定中允許定位，或手動輸入地址。',
+        [error.POSITION_UNAVAILABLE]: '無法取得位置資訊，請手動輸入地址。',
+        [error.TIMEOUT]: '定位超時，請重試或手動輸入地址。',
+      };
+      geoMessage = msgs[error.code] || '定位失敗，請手動輸入地址。';
+      render();
+    },
+    { enableHighAccuracy: true, timeout: 10000, maximumAge: 60000 }
+  );
+}
+
+// -----------------------------------------------------------------
+// CART ACTIONS
+// -----------------------------------------------------------------
+function clearCart() {
+  if (confirm(t('clearCart') + '？')) { Store.clearCart(); render(); }
+}
+function removeItem(index) {
+  const cart = window._checkoutCart || [];
+  if (!cart[index]) return;
+  Store.removeFromCart(cart[index].id);
+  render();
+}
+
+// -----------------------------------------------------------------
+// FORM SUBMISSION
+// -----------------------------------------------------------------
+function handleSubmit(e) {
+  e.preventDefault();
+
+  const nameEl    = document.getElementById('f-name');
+  const phoneEl   = document.getElementById('f-phone');
+  const emailEl   = document.getElementById('f-email');
+  const floorEl   = document.getElementById('f-floor');
+  const doorcodeEl= document.getElementById('f-doorcode');
+  const cnameEl   = document.getElementById('f-cname');
+  const cphoneEl  = document.getElementById('f-cphone');
+  if (nameEl)     form.name        = nameEl.value.trim();
+  if (phoneEl)    form.phone       = phoneEl.value.trim();
+  if (emailEl)    form.email       = emailEl.value.trim();
+  if (floorEl)    form.floorUnit   = floorEl.value.trim();
+  if (doorcodeEl) form.doorCode    = doorcodeEl.value.trim();
+  if (cnameEl)    form.contactName = cnameEl.value.trim();
+  if (cphoneEl)   form.contactPhone= cphoneEl.value.trim();
+
+  const errorBox = document.getElementById('error-box');
+  function showError(msg) {
+    errorBox.textContent = msg; errorBox.classList.remove('hidden');
+    errorBox.scrollIntoView({ behavior: 'smooth', block: 'center' });
+  }
+
+  if (!Store.isStoreOpen()) { showError(t('storeClosedSub')); return; }
+  const cart = Store.getCart();
+  if (cart.length === 0) { showError(t('emptyCart')); return; }
+  if (!form.name || !form.phone) { showError('請填寫必填的聯絡資料（姓名和電話）'); return; }
+
+  if (form.deliveryMethod === 'delivery') {
+    const ds = Store.getDeliverySettings();
+    if (!ds.deliveryEnabled) { showError('外送服務暫時停止，請選擇自取。'); return; }
+    if (!form.building.trim()) { showError('請輸入送貨地址（大廈/街道名稱）'); return; }
+    if (!form.floorUnit.trim()) { showError('請輸入樓層/單位'); return; }
+    if (!form.contactName.trim()) { showError('請輸入收件人姓名'); return; }
+    if (!form.contactPhone.trim()) { showError('請輸入收件人電話'); return; }
+
+    const subtotal = Store.getCartTotal();
+    if (ds.minDeliveryAmount && subtotal < ds.minDeliveryAmount) {
+      showError('外送最低消費 $' + ds.minDeliveryAmount + '，目前小計 $' + subtotal + '。'); return;
+    }
+    if (geoStatus === 'out-of-range') { showError('您的地址超出外送範圍，請更換地址或選擇自取。'); return; }
+    if (addressCheckResult && !addressCheckResult.allowed) { showError(addressCheckResult.reason); return; }
+    if (geoStatus !== 'success' && (!addressCheckResult || !addressCheckResult.allowed)) {
+      const finalCheck = checkAddressDistrict(form.building);
+      if (!finalCheck.allowed) { showError(finalCheck.reason); return; }
+      form.deliveryFee = finalCheck.fee;
+    }
+  }
+
+  // Build combined address string
+  form.deliveryAddress = [form.building, form.floorUnit, form.doorCode ? '(門鎖: ' + form.doorCode + ')' : ''].filter(Boolean).join(', ');
+
+  const subtotal    = Store.getCartTotal();
+  const deliveryFee = form.deliveryMethod === 'delivery' ? form.deliveryFee : 0;
+  const tipAmt      = form.tipMode === 'custom'
+    ? (parseInt(form.tipCustom, 10) || 0)
+    : (form.tipMode === 'none' ? 0 : parseInt(form.tipMode, 10));
+  const discount    = form.discountAmount || 0;
+  const grandTotal  = Math.max(0, subtotal + deliveryFee - discount + tipAmt);
+
+  const newOrder = Store.addOrder({
+    items: cart,
+    subtotal: subtotal,
+    deliveryFee: deliveryFee,
+    tipAmount: tipAmt,
+    discountAmount: discount,
+    discountCode: form.discountCode || '',
+    totalAmount: grandTotal,
+    customerInfo: { name: form.name, phone: form.phone, email: form.email },
+    deliveryMethod: form.deliveryMethod,
+    deliveryAddress: form.deliveryMethod === 'delivery' ? form.deliveryAddress : undefined,
+    deliveryBuilding: form.building, deliveryFloorUnit: form.floorUnit,
+    deliveryDoorCode: form.doorCode,
+    deliveryContactName: form.contactName || form.name,
+    deliveryContactPhone: form.contactPhone || form.phone,
+    deliveryLat: form.deliveryLat, deliveryLng: form.deliveryLng,
+    deliveryDistance: form.deliveryDistance, deliveryZoneName: form.deliveryZoneName,
+    pickupTime: form.pickupTime,
+    paymentMethod: form.paymentMethod,
+    notes: form.notes,
+  });
+  Store.clearCart();
+  window.location.href = 'order-confirmation.html?id=' + newOrder.id;
+}
+
+// Boot
+render();
+</script>
+</body>
+</html>

@@ -1,0 +1,657 @@
+<!DOCTYPE html>
+<html lang="zh-HK">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>小島料理 管理後台 – 菜單管理</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="js/i18n.js"></script>
+  <script src="js/data.js"></script>
+  <script src="js/store.js"></script>
+</head>
+<body class="bg-[#f5f5f5] font-sans min-h-screen flex flex-col">
+
+  <div id="header-root"></div>
+
+  <main class="flex-1 max-w-7xl w-full mx-auto px-8 py-8 space-y-12">
+    <div id="store-settings-section"></div>
+    <div id="delivery-settings-section"></div>
+    <div id="specials-section"></div>
+    <div id="discount-codes-section"></div>
+    <div id="categories-section"></div>
+    <div id="menu-items-section"></div>
+  </main>
+
+<script>
+// ===================================================================
+// admin-menu.html  —  Admin Menu + Settings + Delivery Management
+// ===================================================================
+
+document.getElementById('header-root').innerHTML = renderAdminHeader('admin-menu.html');
+
+let editingCategoryId = null;
+let editingItemId     = null;
+let isAddingCategory  = false;
+let isAddingItem      = false;
+let editingZoneId     = null;
+let isAddingZone      = false;
+
+let tempCatName = '';
+let newCat      = { name: '' };
+let newItem     = { name: '', description: '', price: 0, categoryId: '', tags: [], image: '', customizations: [] };
+
+function render() {
+  renderSettings();
+  renderDeliverySettings();
+  renderSpecialsSection();
+  renderDiscountCodesSection();
+  renderCategories();
+  renderMenuItems();
+}
+
+// ===================================================================
+// SECTION 1: Store Settings
+// ===================================================================
+function renderSettings() {
+  const s = Store.getSettings();
+  document.getElementById('store-settings-section').innerHTML = `
+    <section class="bg-white p-6 rounded-2xl border border-gray-200 shadow-sm">
+      <div class="flex items-center gap-2 mb-6">
+        <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#9ca3af" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"></path><polyline points="9 22 9 12 15 12 15 22"></polyline></svg>
+        <h2 class="text-lg font-bold">營業狀態與時間</h2>
+      </div>
+      <div class="space-y-6">
+        <div class="flex items-center gap-4">
+          <label class="relative inline-flex items-center cursor-pointer">
+            <input type="checkbox" class="sr-only peer" ${s.isOpen ? 'checked' : ''} onchange="toggleStore(this.checked)" />
+            <div class="w-14 h-7 bg-gray-200 rounded-full peer peer-checked:after:translate-x-full after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border after:border-gray-300 after:rounded-full after:h-6 after:w-6 after:transition-all peer-checked:bg-green-500"></div>
+            <span class="ml-3 text-sm font-medium">${s.isOpen ? '營業中 (接受訂單)' : '休息中 (暫停接單)'}</span>
+          </label>
+        </div>
+        <div>
+          <label class="block text-sm text-gray-600 mb-2">營業時間顯示</label>
+          <input type="text" value="${s.operatingHours}" oninput="updateHours(this.value)"
+            placeholder="例如：11:00 AM - 10:00 PM"
+            class="w-full max-w-md border border-gray-200 rounded-xl px-4 py-3 focus:outline-none focus:ring-2 focus:ring-orange-500" />
+          <p class="text-xs text-gray-500 mt-2">這段文字將顯示在顧客的菜單頁面上。</p>
+        </div>
+        <div>
+          <label class="block text-sm text-gray-600 mb-2">接單逾時 (分鐘)</label>
+          <input type="number" min="1" max="60" value="${s.orderAcceptTimeoutMins || 10}" oninput="updateTimeout(this.value)"
+            class="w-32 border border-gray-200 rounded-xl px-4 py-3 focus:outline-none focus:ring-2 focus:ring-orange-500" />
+          <p class="text-xs text-gray-500 mt-2">待接訂單超過此時限後，倒計時變紅提醒員工處理。</p>
+        </div>
+      </div>
+    </section>`;
+}
+
+function toggleStore(isOpen) {
+  const s = Store.getSettings();
+  Store.saveSettings({ ...s, isOpen });
+  renderSettings();
+}
+
+function updateHours(hours) {
+  const s = Store.getSettings();
+  Store.saveSettings({ ...s, operatingHours: hours });
+}
+
+function updateTimeout(val) {
+  const s = Store.getSettings();
+  Store.saveSettings({ ...s, orderAcceptTimeoutMins: Math.max(1, parseInt(val, 10) || 10) });
+}
+
+// ===================================================================
+// TODAY'S SPECIALS  —  toggle which items appear in the specials strip
+// ===================================================================
+function renderSpecialsSection() {
+  const items    = Store.getMenuItems();
+  const specials = Store.getSpecials();
+
+  const rows = items.map(item => {
+    const isSpecial = specials.includes(item.id);
+    return `
+      <div class="bg-white p-4 rounded-xl border border-gray-200 flex justify-between items-center">
+        <div class="flex items-center gap-3">
+          ${item.image ? `<img src="${htmlEscape(item.image)}" class="w-10 h-10 object-cover rounded-lg" referrerpolicy="no-referrer" />` : '<div class="w-10 h-10 bg-gray-100 rounded-lg"></div>'}
+          <div>
+            <div class="font-medium text-sm">${htmlEscape(item.name)}</div>
+            <div class="text-xs text-gray-500">$${item.price}</div>
+          </div>
+        </div>
+        <label class="relative inline-flex items-center cursor-pointer">
+          <input type="checkbox" class="sr-only peer" ${isSpecial ? 'checked' : ''}
+            onchange="Store.toggleSpecial('${item.id}'); renderSpecialsSection();" />
+          <div class="w-11 h-6 bg-gray-200 rounded-full peer peer-checked:after:translate-x-full after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border after:border-gray-300 after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-orange-500"></div>
+          <span class="ml-3 text-sm font-medium ${isSpecial ? 'text-orange-600' : 'text-gray-400'}">${isSpecial ? '今日特選 ⭐' : '普通'}</span>
+        </label>
+      </div>`;
+  }).join('');
+
+  document.getElementById('specials-section').innerHTML = `
+    <section class="bg-white p-6 rounded-2xl border border-gray-200 shadow-sm">
+      <div class="flex items-center gap-2 mb-6">
+        <span class="text-2xl">⭐</span>
+        <h2 class="text-lg font-bold">今日特選管理</h2>
+        <span class="text-sm text-gray-500 ml-2">選擇要顯示在菜單頂部「今日特選」區域的餐點</span>
+      </div>
+      <div class="space-y-3">${rows || '<div class="text-gray-400 text-sm">暫無菜品</div>'}</div>
+    </section>`;
+}
+
+// ===================================================================
+// DISCOUNT CODES
+// ===================================================================
+let isAddingDiscount = false;
+
+function renderDiscountCodesSection() {
+  const codes = Store.getDiscountCodes();
+
+  const rows = codes.map(code => `
+    <div class="bg-white p-4 rounded-xl border border-gray-200 flex justify-between items-center">
+      <div class="flex items-center gap-4">
+        <div class="bg-orange-50 border border-orange-200 px-3 py-1 rounded-lg font-mono font-bold text-orange-700 text-sm">${htmlEscape(code.code)}</div>
+        <div>
+          <div class="text-sm font-medium">${code.type === 'percent' ? code.value + '% 折扣' : '$' + code.value + ' 折扣'}</div>
+          ${code.label ? `<div class="text-xs text-gray-500">${htmlEscape(code.label)}</div>` : ''}
+        </div>
+      </div>
+      <div class="flex items-center gap-4">
+        <label class="relative inline-flex items-center cursor-pointer">
+          <input type="checkbox" class="sr-only peer" ${code.active !== false ? 'checked' : ''}
+            onchange="toggleDiscount('${htmlEscape(code.code)}', this.checked)" />
+          <div class="w-11 h-6 bg-gray-200 rounded-full peer peer-checked:after:translate-x-full after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border after:border-gray-300 after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-green-500"></div>
+          <span class="ml-2 text-sm">${code.active !== false ? '啟用' : '停用'}</span>
+        </label>
+        <button onclick="deleteDiscount('${htmlEscape(code.code)}')" class="text-gray-400 hover:text-red-500">🗑️</button>
+      </div>
+    </div>`).join('');
+
+  const addForm = isAddingDiscount ? `
+    <div class="bg-white p-4 rounded-xl border border-blue-200 space-y-3">
+      <div class="grid grid-cols-3 gap-3">
+        <div>
+          <label class="block text-xs text-gray-500 mb-1">折扣碼 *</label>
+          <input type="text" id="dc-code" placeholder="如：MOJIMA10" class="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm uppercase focus:outline-none focus:ring-2 focus:ring-orange-500" />
+        </div>
+        <div>
+          <label class="block text-xs text-gray-500 mb-1">類型</label>
+          <select id="dc-type" class="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-orange-500">
+            <option value="fixed">固定金額 ($)</option>
+            <option value="percent">百分比 (%)</option>
+          </select>
+        </div>
+        <div>
+          <label class="block text-xs text-gray-500 mb-1">折扣值 *</label>
+          <input type="number" id="dc-value" min="1" placeholder="10" class="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-orange-500" />
+        </div>
+      </div>
+      <div>
+        <label class="block text-xs text-gray-500 mb-1">說明 (選填)</label>
+        <input type="text" id="dc-label" placeholder="如：新客優惠" class="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-orange-500" />
+      </div>
+      <div class="flex gap-2">
+        <button onclick="saveNewDiscount()" class="bg-blue-600 text-white px-4 py-2 rounded-lg text-sm hover:bg-blue-700">儲存</button>
+        <button onclick="isAddingDiscount=false; renderDiscountCodesSection();" class="text-gray-400 text-sm px-4 py-2">取消</button>
+      </div>
+    </div>` : '';
+
+  document.getElementById('discount-codes-section').innerHTML = `
+    <section class="bg-white p-6 rounded-2xl border border-gray-200 shadow-sm">
+      <div class="flex justify-between items-center mb-6">
+        <div class="flex items-center gap-2">
+          <span class="text-2xl">🏷️</span>
+          <h2 class="text-lg font-bold">折扣碼管理</h2>
+        </div>
+        <button onclick="isAddingDiscount=true; renderDiscountCodesSection();"
+          class="bg-orange-500 text-white px-4 py-2 rounded-lg text-sm flex items-center gap-2 hover:bg-orange-600">
+          + 新增折扣碼
+        </button>
+      </div>
+      <div class="space-y-3">
+        ${addForm}
+        ${rows || '<div class="text-gray-400 text-sm py-4 text-center">暫無折扣碼</div>'}
+      </div>
+    </section>`;
+}
+
+function saveNewDiscount() {
+  const code  = (document.getElementById('dc-code').value || '').trim().toUpperCase();
+  const type  = document.getElementById('dc-type').value;
+  const value = parseInt(document.getElementById('dc-value').value, 10) || 0;
+  const label = (document.getElementById('dc-label').value || '').trim();
+  if (!code) { document.getElementById('dc-code').focus(); return; }
+  if (!value) { document.getElementById('dc-value').focus(); return; }
+  const codes = Store.getDiscountCodes();
+  if (codes.find(c => c.code === code)) { alert('此折扣碼已存在！'); return; }
+  codes.push({ code, type, value, label, active: true });
+  Store.saveDiscountCodes(codes);
+  isAddingDiscount = false;
+  renderDiscountCodesSection();
+}
+
+function toggleDiscount(code, active) {
+  const codes = Store.getDiscountCodes().map(c => c.code === code ? { ...c, active } : c);
+  Store.saveDiscountCodes(codes);
+}
+
+function deleteDiscount(code) {
+  if (!confirm('確定刪除折扣碼「' + code + '」？')) return;
+  Store.saveDiscountCodes(Store.getDiscountCodes().filter(c => c.code !== code));
+  renderDiscountCodesSection();
+}
+
+// ===================================================================
+// SECTION 1.5: Delivery Settings
+// ===================================================================
+function renderDeliverySettings() {
+  const ds = Store.getDeliverySettings();
+
+  let zonesHtml = ds.zones.map(zone => {
+    if (editingZoneId === zone.id) {
+      return `
+        <div class="bg-white p-4 rounded-xl border border-blue-200 grid grid-cols-4 gap-3 items-end">
+          <div>
+            <label class="block text-xs text-gray-500 mb-1">名稱</label>
+            <input type="text" id="edit-zone-name" value="${htmlEscape(zone.name)}" class="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500" />
+          </div>
+          <div>
+            <label class="block text-xs text-gray-500 mb-1">最遠距離(km)</label>
+            <input type="number" step="0.1" id="edit-zone-km" value="${zone.maxKm}" class="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500" />
+          </div>
+          <div>
+            <label class="block text-xs text-gray-500 mb-1">運費($)</label>
+            <input type="number" id="edit-zone-fee" value="${zone.fee}" class="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500" />
+          </div>
+          <div class="flex gap-2">
+            <button onclick="saveZoneEdit('${zone.id}')" class="text-blue-600 hover:text-blue-800 text-sm font-medium">儲存</button>
+            <button onclick="editingZoneId=null; renderDeliverySettings();" class="text-gray-400 text-sm">取消</button>
+          </div>
+        </div>`;
+    }
+    return `
+      <div class="bg-white p-4 rounded-xl border border-gray-200 flex justify-between items-center">
+        <div class="flex items-center gap-4">
+          <div class="w-3 h-3 rounded-full ${zone.fee === 0 ? 'bg-green-400' : zone.fee <= 15 ? 'bg-yellow-400' : 'bg-orange-400'}"></div>
+          <div>
+            <span class="font-medium text-sm">${htmlEscape(zone.name)}</span>
+            <span class="text-gray-400 text-xs ml-2">≤ ${zone.maxKm}km</span>
+          </div>
+        </div>
+        <div class="flex items-center gap-4">
+          <span class="font-bold text-sm">${zone.fee === 0 ? '免運費' : '$' + zone.fee}</span>
+          <div class="flex gap-3 text-gray-400">
+            <button onclick="editingZoneId='${zone.id}'; isAddingZone=false; renderDeliverySettings();" class="hover:text-black text-sm" title="編輯">✏️</button>
+            <button onclick="deleteZone('${zone.id}')" class="hover:text-red-500 text-sm" title="刪除">🗑️</button>
+          </div>
+        </div>
+      </div>`;
+  }).join('');
+
+  if (isAddingZone) {
+    zonesHtml = `
+      <div class="bg-white p-4 rounded-xl border border-blue-200 grid grid-cols-4 gap-3 items-end">
+        <div>
+          <label class="block text-xs text-gray-500 mb-1">名稱</label>
+          <input type="text" id="new-zone-name" placeholder="如：遠距離" class="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500" autofocus />
+        </div>
+        <div>
+          <label class="block text-xs text-gray-500 mb-1">最遠距離(km)</label>
+          <input type="number" step="0.1" id="new-zone-km" value="5" class="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500" />
+        </div>
+        <div>
+          <label class="block text-xs text-gray-500 mb-1">運費($)</label>
+          <input type="number" id="new-zone-fee" value="30" class="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500" />
+        </div>
+        <div class="flex gap-2">
+          <button onclick="saveNewZone()" class="text-blue-600 hover:text-blue-800 text-sm font-medium">儲存</button>
+          <button onclick="isAddingZone=false; renderDeliverySettings();" class="text-gray-400 text-sm">取消</button>
+        </div>
+      </div>` + zonesHtml;
+  }
+
+  document.getElementById('delivery-settings-section').innerHTML = `
+    <section class="bg-white p-6 rounded-2xl border border-gray-200 shadow-sm">
+      <div class="flex items-center gap-2 mb-6">
+        <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#9ca3af" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="1" y="3" width="15" height="13"></rect><polygon points="16 8 20 8 23 11 23 16 16 16 16 8"></polygon><circle cx="5.5" cy="18.5" r="2.5"></circle><circle cx="18.5" cy="18.5" r="2.5"></circle></svg>
+        <h2 class="text-lg font-bold">外送設定</h2>
+      </div>
+
+      <div class="space-y-6">
+        <!-- Delivery enable toggle -->
+        <div class="flex items-center gap-4">
+          <label class="relative inline-flex items-center cursor-pointer">
+            <input type="checkbox" class="sr-only peer" ${ds.deliveryEnabled ? 'checked' : ''} onchange="toggleDelivery(this.checked)" />
+            <div class="w-14 h-7 bg-gray-200 rounded-full peer peer-checked:after:translate-x-full after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border after:border-gray-300 after:rounded-full after:h-6 after:w-6 after:transition-all peer-checked:bg-green-500"></div>
+            <span class="ml-3 text-sm font-medium">${ds.deliveryEnabled ? '外送開啟' : '外送關閉'}</span>
+          </label>
+        </div>
+
+        <!-- Min order amount -->
+        <div>
+          <label class="block text-sm text-gray-600 mb-2">最低外送金額 ($)</label>
+          <input type="number" value="${ds.minDeliveryAmount}" oninput="updateMinDelivery(this.value)"
+            class="w-32 border border-gray-200 rounded-xl px-4 py-3 focus:outline-none focus:ring-2 focus:ring-orange-500" />
+        </div>
+
+        <!-- Max delivery radius -->
+        <div>
+          <label class="block text-sm text-gray-600 mb-2">最大外送範圍 (km)</label>
+          <input type="number" step="0.5" value="${ds.maxDeliveryKm}" oninput="updateMaxKm(this.value)"
+            class="w-32 border border-gray-200 rounded-xl px-4 py-3 focus:outline-none focus:ring-2 focus:ring-orange-500" />
+        </div>
+
+        <!-- Delivery zones -->
+        <div>
+          <div class="flex justify-between items-center mb-4">
+            <label class="text-sm text-gray-600 font-medium">外送區域與運費</label>
+            <button onclick="editingZoneId=null; isAddingZone=true; renderDeliverySettings();"
+              class="bg-orange-500 text-white px-3 py-1.5 rounded-lg text-xs flex items-center gap-1 hover:bg-orange-600">
+              + 新增區域
+            </button>
+          </div>
+          <div class="space-y-3">${zonesHtml}</div>
+        </div>
+      </div>
+    </section>`;
+}
+
+function toggleDelivery(enabled) {
+  const ds = Store.getDeliverySettings();
+  ds.deliveryEnabled = enabled;
+  Store.saveDeliverySettings(ds);
+  renderDeliverySettings();
+}
+
+function updateMinDelivery(val) {
+  const ds = Store.getDeliverySettings();
+  ds.minDeliveryAmount = Number(val) || 0;
+  Store.saveDeliverySettings(ds);
+}
+
+function updateMaxKm(val) {
+  const ds = Store.getDeliverySettings();
+  ds.maxDeliveryKm = Number(val) || 3.5;
+  Store.saveDeliverySettings(ds);
+}
+
+function saveNewZone() {
+  const name = document.getElementById('new-zone-name').value.trim();
+  const km   = Number(document.getElementById('new-zone-km').value);
+  const fee  = Number(document.getElementById('new-zone-fee').value);
+  if (!name) { document.getElementById('new-zone-name').style.borderColor='#ef4444'; return; }
+  const ds = Store.getDeliverySettings();
+  ds.zones.push({ id: 'z' + Date.now(), name: name, maxKm: km, fee: fee, label: fee === 0 ? '免運費' : '+$' + fee });
+  ds.zones.sort((a, b) => a.maxKm - b.maxKm);
+  Store.saveDeliverySettings(ds);
+  isAddingZone = false;
+  renderDeliverySettings();
+}
+
+function saveZoneEdit(id) {
+  const name = document.getElementById('edit-zone-name').value.trim();
+  const km   = Number(document.getElementById('edit-zone-km').value);
+  const fee  = Number(document.getElementById('edit-zone-fee').value);
+  if (!name) return;
+  const ds = Store.getDeliverySettings();
+  ds.zones = ds.zones.map(z => z.id === id ? { ...z, name, maxKm: km, fee, label: fee === 0 ? '免運費' : '+$' + fee } : z);
+  ds.zones.sort((a, b) => a.maxKm - b.maxKm);
+  Store.saveDeliverySettings(ds);
+  editingZoneId = null;
+  renderDeliverySettings();
+}
+
+function deleteZone(id) {
+  if (!confirm('確定刪除此配送區域？')) return;
+  const ds = Store.getDeliverySettings();
+  ds.zones = ds.zones.filter(z => z.id !== id);
+  Store.saveDeliverySettings(ds);
+  renderDeliverySettings();
+}
+
+// ===================================================================
+// SECTION 2: Category Manager
+// ===================================================================
+function renderCategories() {
+  const cats = Store.getCategories();
+  let rows = cats.map(cat => {
+    if (editingCategoryId === cat.id) {
+      return `
+        <div class="bg-white p-4 rounded-xl border border-blue-200 flex gap-4 items-center">
+          <input type="text" id="edit-cat-name" value="${htmlEscape(cat.name)}" class="flex-1 border border-gray-200 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500" autofocus />
+          <button onclick="saveCategoryEdit('${cat.id}')" class="text-blue-600 hover:text-blue-800 text-sm font-medium">儲存</button>
+          <button onclick="editingCategoryId=null; renderCategories();" class="text-gray-400 hover:text-gray-600 text-sm">取消</button>
+        </div>`;
+    }
+    return `
+      <div class="bg-white p-4 rounded-xl border border-gray-200 flex justify-between items-center">
+        <span class="font-medium">${htmlEscape(cat.name)}</span>
+        <div class="flex gap-3 text-gray-400">
+          <button onclick="startEditCategory('${cat.id}')" class="hover:text-black" title="編輯">✏️</button>
+          <button onclick="deleteCategory('${cat.id}')" class="hover:text-red-500" title="刪除">🗑️</button>
+        </div>
+      </div>`;
+  }).join('');
+
+  if (isAddingCategory) {
+    rows = `
+      <div class="bg-white p-4 rounded-xl border border-blue-200 flex gap-4 items-center">
+        <input type="text" id="new-cat-name" placeholder="分類名稱" class="flex-1 border border-gray-200 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500" autofocus />
+        <button onclick="saveNewCategory()" class="text-blue-600 hover:text-blue-800 text-sm font-medium">儲存</button>
+        <button onclick="isAddingCategory=false; renderCategories();" class="text-gray-400 text-sm">取消</button>
+      </div>` + rows;
+  }
+
+  document.getElementById('categories-section').innerHTML = `
+    <section>
+      <div class="flex justify-between items-center mb-6">
+        <h2 class="text-lg font-bold">分類</h2>
+        <button onclick="editingCategoryId=null; isAddingCategory=true; renderCategories();"
+          class="bg-orange-500 text-white px-4 py-2 rounded-lg text-sm flex items-center gap-2 hover:bg-orange-600">
+          + 新增分類
+        </button>
+      </div>
+      <div class="space-y-3">${rows}</div>
+    </section>`;
+}
+
+function startEditCategory(id) {
+  isAddingCategory  = false;
+  editingCategoryId = id;
+  renderCategories();
+}
+
+function saveCategoryEdit(id) {
+  const val = document.getElementById('edit-cat-name').value.trim();
+  if (val) Store.updateCategory(id, val);
+  editingCategoryId = null;
+  renderCategories();
+}
+
+function saveNewCategory() {
+  const val = document.getElementById('new-cat-name').value.trim();
+  if (!val) {
+    document.getElementById('new-cat-name').style.borderColor = '#ef4444';
+    document.getElementById('new-cat-name').placeholder = '請輸入分類名稱！';
+    return;
+  }
+  Store.addCategory(val);
+  isAddingCategory = false;
+  renderCategories();
+  renderMenuItems();
+}
+
+function deleteCategory(id) {
+  if (confirm('刪除此分類會同時刪除其下的所有菜品，確定嗎？')) {
+    Store.deleteCategory(id);
+    renderCategories();
+    renderMenuItems();
+  }
+}
+
+// ===================================================================
+// SECTION 3: Menu Item Manager
+// ===================================================================
+function renderMenuItems() {
+  const items = Store.getMenuItems();
+  const cats  = Store.getCategories();
+  const catName = id => (cats.find(c => c.id === id) || {}).name || '';
+  const catOptions = cats.map(c => `<option value="${c.id}">${c.name}</option>`).join('');
+
+  let rows = items.map(item => {
+    if (editingItemId === item.id) {
+      return `
+        <div class="bg-white p-6 rounded-xl border border-blue-200 space-y-4">
+          <div class="flex justify-between items-center">
+            <h3 class="font-bold">編輯菜品</h3>
+            <button onclick="editingItemId=null; renderMenuItems();" class="text-gray-400 hover:text-gray-600">✕</button>
+          </div>
+          ${itemFormHtml(item, catOptions, false)}
+        </div>`;
+    }
+    return `
+      <div class="bg-white p-4 rounded-xl border border-gray-200">
+        <div class="flex justify-between items-center">
+          <div class="flex items-center gap-4">
+            ${item.image
+              ? `<img src="${htmlEscape(item.image)}" alt="${htmlEscape(item.name)}" class="w-12 h-12 object-cover rounded-lg" referrerpolicy="no-referrer" />`
+              : `<div class="w-12 h-12 bg-gray-100 rounded-lg flex items-center justify-center text-gray-400 text-xs">無圖</div>`}
+            <div>
+              <div class="font-medium">${htmlEscape(item.name)}</div>
+              <div class="text-sm text-gray-500">$${item.price} · ${htmlEscape(catName(item.categoryId))}</div>
+              ${item.description ? `<div class="text-xs text-gray-400 mt-1 truncate max-w-xs">${htmlEscape(item.description)}</div>` : ''}
+            </div>
+          </div>
+          <div class="flex items-center gap-6">
+            <label class="relative inline-flex items-center cursor-pointer">
+              <input type="checkbox" class="sr-only peer" ${item.isAvailable !== false ? 'checked' : ''}
+                onchange="Store.updateMenuItem('${item.id}', { isAvailable: this.checked }); renderMenuItems();" />
+              <div class="w-11 h-6 bg-gray-200 rounded-full peer peer-checked:after:translate-x-full after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border after:border-gray-300 after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-green-500"></div>
+              <span class="ml-3 text-sm font-medium text-gray-900">${item.isAvailable !== false ? '供應中' : '售罄'}</span>
+            </label>
+            <div class="flex gap-3 text-gray-400">
+              <button onclick="isAddingItem=false; editingItemId='${item.id}'; renderMenuItems();" class="hover:text-black" title="編輯">✏️</button>
+              <button onclick="deleteItem('${item.id}')" class="hover:text-red-500" title="刪除">🗑️</button>
+            </div>
+          </div>
+        </div>
+      </div>`;
+  }).join('');
+
+  if (isAddingItem) {
+    const blank = { name:'', description:'', price:0, categoryId: cats[0]?.id||'', image:'' };
+    rows = `
+      <div class="bg-white p-6 rounded-xl border border-blue-200 space-y-4">
+        <div class="flex justify-between items-center">
+          <h3 class="font-bold">新增菜品</h3>
+          <button onclick="isAddingItem=false; renderMenuItems();" class="text-gray-400 hover:text-gray-600">✕</button>
+        </div>
+        ${itemFormHtml(blank, catOptions, true)}
+      </div>` + rows;
+  }
+
+  document.getElementById('menu-items-section').innerHTML = `
+    <section>
+      <div class="flex justify-between items-center mb-6">
+        <h2 class="text-lg font-bold">菜品</h2>
+        <button onclick="editingItemId=null; isAddingItem=true; renderMenuItems();"
+          class="bg-orange-500 text-white px-4 py-2 rounded-lg text-sm flex items-center gap-2 hover:bg-orange-600">
+          + 新增菜品
+        </button>
+      </div>
+      <div class="space-y-3">${rows}</div>
+    </section>`;
+}
+
+function itemFormHtml(item, _catOptions, isNew) {
+  const id = item.id || '';
+  const saveCall = isNew ? 'saveNewItem()' : `saveItemEdit('${id}')`;
+  const catOpts  = Store.getCategories().map(c =>
+    `<option value="${c.id}" ${item.categoryId === c.id ? 'selected' : ''}>${c.name}</option>`).join('');
+
+  return `
+    <div class="grid grid-cols-2 gap-4">
+      <div>
+        <label class="block text-sm text-gray-600 mb-1">名稱 *</label>
+        <input type="text" id="${isNew?'new':'edit'}-item-name" value="${htmlEscape(item.name||'')}"
+          class="w-full border border-gray-200 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-orange-500" />
+      </div>
+      <div>
+        <label class="block text-sm text-gray-600 mb-1">價格 *</label>
+        <input type="number" id="${isNew?'new':'edit'}-item-price" value="${item.price||0}"
+          class="w-full border border-gray-200 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-orange-500" />
+      </div>
+      <div class="col-span-2">
+        <label class="block text-sm text-gray-600 mb-1">描述</label>
+        <textarea id="${isNew?'new':'edit'}-item-desc" class="w-full border border-gray-200 rounded-lg px-3 py-2 h-20 focus:outline-none focus:ring-2 focus:ring-orange-500">${htmlEscape(item.description||'')}</textarea>
+      </div>
+      <div>
+        <label class="block text-sm text-gray-600 mb-1">分類 *</label>
+        <select id="${isNew?'new':'edit'}-item-cat" class="w-full border border-gray-200 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-orange-500">${catOpts}</select>
+      </div>
+      <div>
+        <label class="block text-sm text-gray-600 mb-1">圖片 URL</label>
+        <input type="text" id="${isNew?'new':'edit'}-item-img" value="${htmlEscape(item.image||'')}"
+          placeholder="https://..." class="w-full border border-gray-200 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-orange-500" />
+      </div>
+    </div>
+    <div class="flex justify-end pt-4">
+      <button onclick="${saveCall}" class="bg-blue-600 text-white px-6 py-2 rounded-lg hover:bg-blue-700">儲存</button>
+    </div>`;
+}
+
+function saveNewItem() {
+  const name  = document.getElementById('new-item-name').value.trim();
+  const price = Number(document.getElementById('new-item-price').value);
+  const cat   = document.getElementById('new-item-cat').value;
+
+  if (!name) {
+    const el = document.getElementById('new-item-name');
+    el.style.borderColor = '#ef4444'; el.placeholder = '請輸入菜品名稱！'; el.focus(); return;
+  }
+  if (!cat) { alert('請先新增至少一個分類，才能新增菜品。'); return; }
+
+  Store.addMenuItem({
+    name, price,
+    description: document.getElementById('new-item-desc').value.trim(),
+    categoryId:  cat,
+    image:       document.getElementById('new-item-img').value.trim(),
+    tags: [], customizations: [], isAvailable: true,
+  });
+  isAddingItem = false;
+  renderMenuItems();
+}
+
+function saveItemEdit(id) {
+  const name  = document.getElementById('edit-item-name').value.trim();
+  const price = Number(document.getElementById('edit-item-price').value);
+  const cat   = document.getElementById('edit-item-cat').value;
+
+  if (!name) {
+    const el = document.getElementById('edit-item-name');
+    el.style.borderColor = '#ef4444'; el.placeholder = '請輸入菜品名稱！'; el.focus(); return;
+  }
+  if (!cat) { alert('請先新增至少一個分類。'); return; }
+
+  Store.updateMenuItem(id, {
+    name, price,
+    description: document.getElementById('edit-item-desc').value.trim(),
+    categoryId:  cat,
+    image:       document.getElementById('edit-item-img').value.trim(),
+  });
+  editingItemId = null;
+  renderMenuItems();
+}
+
+function deleteItem(id) {
+  if (confirm('確定刪除這個菜品嗎？')) {
+    Store.deleteMenuItem(id);
+    renderMenuItems();
+  }
+}
+
+// Boot
+render();
+</script>
+</body>
+</html>

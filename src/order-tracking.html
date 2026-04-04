@@ -1,0 +1,294 @@
+<!DOCTYPE html>
+<html lang="zh-HK">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>小島料理 – 查詢訂單</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="js/i18n.js"></script>
+  <script src="js/data.js"></script>
+  <script src="js/store.js"></script>
+</head>
+<body class="bg-[#f9f9f9] font-sans">
+
+  <div id="header-root"></div>
+
+  <main class="max-w-2xl mx-auto px-8 py-12">
+    <h1 class="text-2xl font-bold mb-8 text-center" id="page-title">查詢訂單</h1>
+
+    <form onsubmit="handleSearch(event)" class="relative mb-12">
+      <input id="search-input" type="text" placeholder="${t('enterOrderId')}"
+        class="w-full border border-gray-200 rounded-full px-6 py-4 pr-16 focus:outline-none focus:ring-2 focus:ring-orange-500 shadow-sm text-lg" />
+      <button type="submit"
+        class="absolute right-2 top-2 bottom-2 w-12 bg-orange-500 text-white rounded-full flex items-center justify-center hover:bg-orange-600">
+        <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>
+      </button>
+    </form>
+
+    <!-- Notification permission banner -->
+    <div id="notif-banner"></div>
+
+    <div id="result"></div>
+
+    <!-- Refund modal -->
+    <div id="refund-modal" class="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4 hidden">
+      <div class="bg-white rounded-2xl w-full max-w-sm p-6 space-y-4">
+        <h3 class="text-lg font-bold">申請退款</h3>
+        <p class="text-sm text-gray-500">請說明退款原因，我們的員工將盡快處理您的申請。</p>
+        <textarea id="refund-reason-input" placeholder="退款原因（選填）..."
+          class="w-full border border-gray-200 rounded-xl p-3 h-24 resize-none focus:outline-none focus:ring-2 focus:ring-orange-500 text-sm"></textarea>
+        <div class="flex gap-3">
+          <button onclick="submitRefund()"
+            class="flex-1 bg-orange-500 text-white py-3 rounded-xl font-medium hover:bg-orange-600">提交申請</button>
+          <button onclick="closeRefundModal()"
+            class="flex-1 bg-gray-100 text-gray-600 py-3 rounded-xl font-medium hover:bg-gray-200">取消</button>
+        </div>
+      </div>
+    </div>
+  </main>
+
+<script>
+document.getElementById('header-root').innerHTML = renderHeader();
+document.getElementById('page-title').textContent = t('trackOrder');
+
+let currentOrder = null;
+let hasSearched  = false;
+let _refundOrderId = null;
+let _lastStatus  = null;
+
+// ───────────────────────────────────────────────────────────────────
+// NOTIFICATIONS
+// ───────────────────────────────────────────────────────────────────
+function renderNotifBanner() {
+  const el = document.getElementById('notif-banner');
+  if (!('Notification' in window) || Notification.permission === 'granted' || !currentOrder) {
+    el.innerHTML = ''; return;
+  }
+  el.innerHTML = `
+    <div class="mb-6 bg-blue-50 border border-blue-200 rounded-xl p-4 flex items-center justify-between">
+      <div class="text-sm text-blue-700">開啟通知，當訂單狀態更新時自動通知您</div>
+      <button onclick="enableNotif()" class="text-xs bg-blue-600 text-white px-3 py-2 rounded-lg hover:bg-blue-700">${t('notificationAllow')}</button>
+    </div>`;
+}
+
+function enableNotif() {
+  requestNotificationPermission(function(granted) {
+    renderNotifBanner();
+    if (granted && currentOrder) {
+      showNotification('通知已開啟', '訂單 #' + currentOrder.id + ' 狀態更新時將通知您', 'notif-tracking');
+    }
+  });
+}
+
+// ───────────────────────────────────────────────────────────────────
+// SEARCH
+// ───────────────────────────────────────────────────────────────────
+function init() {
+  const params = new URLSearchParams(window.location.search);
+  const id     = params.get('id');
+  if (id) {
+    document.getElementById('search-input').value = id;
+    currentOrder = Store.getOrderById(id);
+    hasSearched  = true;
+    if (currentOrder) _lastStatus = currentOrder.status;
+    renderResult();
+    renderNotifBanner();
+  }
+}
+
+function handleSearch(e) {
+  e.preventDefault();
+  const q = document.getElementById('search-input').value.trim();
+  hasSearched = true;
+  const orders = Store.getOrders();
+  currentOrder = orders.find(o => o.id === q || o.customerInfo.phone === q) || null;
+  if (currentOrder) _lastStatus = currentOrder.status;
+  renderResult();
+  renderNotifBanner();
+}
+
+// ───────────────────────────────────────────────────────────────────
+// RENDER RESULT
+// ───────────────────────────────────────────────────────────────────
+function renderResult() {
+  const el = document.getElementById('result');
+
+  if (hasSearched && !currentOrder) {
+    el.innerHTML = `<div class="text-center text-gray-500 py-12">${t('orderNotFound')}</div>`;
+    return;
+  }
+  if (!currentOrder) { el.innerHTML = ''; return; }
+
+  const o = currentOrder;
+  const isCancelled = o.status === 'cancelled';
+  const isCompleted = o.status === 'completed';
+  const hasDeliveryFee = o.deliveryFee && o.deliveryFee > 0;
+  const subtotal = o.subtotal || (o.totalAmount - (o.deliveryFee || 0));
+
+  // ── Timeline ──
+  const steps = [
+    { key: 'confirmed',
+      label: t('orderConfirmed'), sub: t('orderConfirmedSub'), icon: '✓',
+      activeStatuses: ['pending','accepted','cooking','delivering','ready','completed'] },
+    { key: 'cooking',
+      label: t('cookingStep'), sub: t('cookingSub'), icon: '♨',
+      activeStatuses: ['cooking','delivering','ready','completed'] },
+    { key: 'ready',
+      label: o.deliveryMethod === 'pickup' ? t('readyPickup') : t('delivering'),
+      sub:   o.deliveryMethod === 'pickup' ? t('readyPickupSub') : t('deliveringSub'),
+      icon: '📦',
+      activeStatuses: ['delivering','ready','completed'] },
+    { key: 'done',
+      label: t('completed'),
+      sub: o.deliveryMethod === 'pickup' ? t('completedPickupSub') : t('completedDeliverySub'),
+      icon: '✓',
+      activeStatuses: ['completed'] },
+  ];
+
+  const timelineHtml = isCancelled ? '' : `
+    <div class="relative pl-8 space-y-8 mb-12">
+      <div class="absolute left-[11px] top-2 bottom-2 w-0.5 bg-gray-100"></div>
+      ${steps.map(step => {
+        const active = step.activeStatuses.includes(o.status);
+        return `
+        <div class="relative">
+          <div class="absolute -left-8 w-6 h-6 rounded-full flex items-center justify-center ring-4 ring-white text-xs font-bold ${active ? 'bg-green-500 text-white' : 'bg-gray-200 text-gray-400'}">
+            ${step.icon}
+          </div>
+          <h3 class="font-bold ${active ? 'text-black' : 'text-gray-400'}">${step.label}</h3>
+          <p class="text-sm text-gray-500 mt-1">${step.sub}</p>
+        </div>`;
+      }).join('')}
+    </div>`;
+
+  // ── Refund section ──
+  const canRequestRefund = (isCompleted || isCancelled) &&
+    !['refund_requested','refund_approved','refund_rejected'].includes(o.status);
+  const refundStatusHtml = {
+    refund_requested: `<div class="bg-pink-50 border border-pink-200 rounded-xl p-4 text-pink-700 text-sm font-medium">⏳ ${t('refundRequested')}</div>`,
+    refund_approved:  `<div class="bg-green-50 border border-green-200 rounded-xl p-4 text-green-700 text-sm font-medium">✓ 退款已批准${o.refundNote ? ' — ' + htmlEscape(o.refundNote) : ''}</div>`,
+    refund_rejected:  `<div class="bg-red-50 border border-red-200 rounded-xl p-4 text-red-600 text-sm font-medium">✕ 退款申請被拒絕${o.refundNote ? ' — ' + htmlEscape(o.refundNote) : ''}</div>`,
+  }[o.status] || '';
+
+  const refundButtonHtml = canRequestRefund ? `
+    <button onclick="openRefundModal('${o.id}')"
+      class="mt-4 w-full bg-gray-100 text-gray-600 py-3 rounded-xl text-sm font-medium hover:bg-gray-200 transition-colors">
+      ${t('requestRefund')}
+    </button>` : '';
+
+  // ── Delivery details ──
+  const deliveryDetailHtml = o.deliveryMethod === 'delivery' ? `
+    <div class="bg-blue-50 rounded-2xl p-4 mb-6 space-y-1 text-sm text-blue-600">
+      <div class="font-medium text-blue-700 mb-1">${t('deliveryInfo')}</div>
+      ${o.deliveryBuilding ? `<div>📍 ${htmlEscape(o.deliveryBuilding)}</div>` : (o.deliveryAddress ? `<div>📍 ${htmlEscape(o.deliveryAddress)}</div>` : '')}
+      ${o.deliveryFloorUnit ? `<div>🏠 ${htmlEscape(o.deliveryFloorUnit)}${o.deliveryDoorCode ? '  🔑 ' + htmlEscape(o.deliveryDoorCode) : ''}</div>` : ''}
+      ${(o.deliveryContactName && o.deliveryContactName !== o.customerInfo.name) ? `<div>👤 ${htmlEscape(o.deliveryContactName)} · ${htmlEscape(o.deliveryContactPhone||'')}</div>` : ''}
+      ${o.deliveryZoneName ? `<div>📍 ${htmlEscape(o.deliveryZoneName)}${o.deliveryDistance != null ? ' · 約'+o.deliveryDistance+'km' : ''}</div>` : ''}
+    </div>` : '';
+
+  el.innerHTML = `
+    <div class="bg-white p-8 rounded-3xl shadow-sm border border-gray-100">
+
+      <div class="flex justify-between items-start mb-8 pb-8 border-b border-gray-100">
+        <div>
+          <h2 class="text-xl font-bold mb-1">訂單 #${o.id}</h2>
+          <p class="text-gray-500 text-sm">${new Date(o.createdAt).toLocaleString()}</p>
+        </div>
+        <div class="px-4 py-1.5 rounded-full text-sm font-medium ${isCancelled ? 'bg-red-50 text-red-600' : isCompleted ? 'bg-gray-100 text-gray-600' : 'bg-blue-50 text-blue-600'}">
+          ${getStatusText(o.status)}
+        </div>
+      </div>
+
+      ${timelineHtml}
+
+      ${deliveryDetailHtml}
+
+      <!-- Order items -->
+      <div class="bg-gray-50 p-6 rounded-2xl">
+        <h3 class="font-bold mb-4">${t('orderContents')}</h3>
+        <div class="space-y-3 mb-4">
+          ${o.items.map(item => `
+            <div class="flex justify-between text-sm">
+              <div>
+                <span>${htmlEscape(item.menuItem.name)} × ${item.quantity}</span>
+                ${item.specialInstructions ? `<div class="text-orange-600 text-xs mt-1 font-medium">備註: ${htmlEscape(item.specialInstructions)}</div>` : ''}
+              </div>
+              <span class="font-medium">$${item.totalPrice}</span>
+            </div>`).join('')}
+        </div>
+        <div class="border-t border-gray-200 pt-4 space-y-2">
+          <div class="flex justify-between text-sm"><span>${t('subtotal')}</span><span>$${subtotal}</span></div>
+          ${hasDeliveryFee ? `<div class="flex justify-between text-sm"><span>${t('deliveryFeeLabel')}</span><span>$${o.deliveryFee}</span></div>` : ''}
+          ${o.discountAmount > 0 ? `<div class="flex justify-between text-sm text-green-600"><span>${t('discountLabel')}</span><span>-$${o.discountAmount}</span></div>` : ''}
+          ${o.tipAmount > 0 ? `<div class="flex justify-between text-sm"><span>${t('tipLabel')}</span><span>$${o.tipAmount}</span></div>` : ''}
+          <div class="flex justify-between items-center font-bold border-t border-gray-200 pt-2">
+            <span>${t('totalLabel')}</span><span>$${o.totalAmount}</span>
+          </div>
+        </div>
+      </div>
+
+      ${refundStatusHtml}
+      ${refundButtonHtml}
+
+    </div>`;
+}
+
+// ───────────────────────────────────────────────────────────────────
+// REFUND MODAL
+// ───────────────────────────────────────────────────────────────────
+function openRefundModal(orderId) {
+  _refundOrderId = orderId;
+  document.getElementById('refund-reason-input').value = '';
+  document.getElementById('refund-modal').classList.remove('hidden');
+}
+
+function closeRefundModal() {
+  _refundOrderId = null;
+  document.getElementById('refund-modal').classList.add('hidden');
+}
+
+function submitRefund() {
+  if (!_refundOrderId) return;
+  const reason = document.getElementById('refund-reason-input').value.trim();
+  const orders = Store.getOrders().map(o => {
+    if (o.id !== _refundOrderId) return o;
+    return Object.assign({}, o, { status: 'refund_requested', refundReason: reason });
+  });
+  localStorage.setItem('mojima_orders', JSON.stringify(orders));
+  currentOrder = Store.getOrderById(_refundOrderId);
+  closeRefundModal();
+  renderResult();
+}
+
+document.getElementById('refund-modal').addEventListener('click', function(e) {
+  if (e.target === this) closeRefundModal();
+});
+
+// ───────────────────────────────────────────────────────────────────
+// AUTO-POLLING  —  detect status changes and notify
+// ───────────────────────────────────────────────────────────────────
+function pollStatus() {
+  if (!currentOrder) return;
+  const fresh = Store.getOrderById(currentOrder.id);
+  if (!fresh) return;
+  if (fresh.status !== _lastStatus) {
+    showNotification(
+      '小島料理 — 訂單更新',
+      '訂單 #' + fresh.id + ' 狀態：' + getStatusText(fresh.status),
+      'status-' + fresh.id
+    );
+    _lastStatus   = fresh.status;
+    currentOrder  = fresh;
+    renderResult();
+  }
+}
+
+setInterval(pollStatus, 15000);
+
+// ───────────────────────────────────────────────────────────────────
+// BOOT
+// ───────────────────────────────────────────────────────────────────
+init();
+</script>
+</body>
+</html>

@@ -1,0 +1,189 @@
+<!DOCTYPE html>
+<html lang="zh-HK">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>小島料理 管理後台 – 營業報告</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="js/i18n.js"></script>
+  <script src="js/data.js"></script>
+  <script src="js/store.js"></script>
+</head>
+<body class="bg-[#f5f5f5] font-sans min-h-screen flex flex-col">
+
+  <div id="header-root"></div>
+
+  <main class="flex-1 max-w-7xl w-full mx-auto px-8 py-8">
+    <div id="page-content"></div>
+  </main>
+
+<script>
+document.getElementById('header-root').innerHTML = renderAdminHeader('admin-reports.html');
+
+function render() {
+  const orders     = Store.getOrders();
+  // refund_rejected = refund denied, merchant keeps the money → count as revenue
+  const completed  = orders.filter(o => o.status === 'completed' || o.status === 'refund_rejected');
+  const today      = new Date().toDateString();
+  const todayOrders = completed.filter(o => new Date(o.createdAt).toDateString() === today);
+
+  const totalRevenue   = completed.reduce((sum, o) => sum + o.totalAmount, 0);
+  const todayRevenue   = todayOrders.reduce((sum, o) => sum + o.totalAmount, 0);
+  const avgOrderValue  = completed.length > 0 ? Math.round(totalRevenue / completed.length) : 0;
+
+  // Delivery fee totals
+  const totalDeliveryFees = completed.reduce((sum, o) => sum + (o.deliveryFee || 0), 0);
+  const deliveryOrders    = completed.filter(o => o.deliveryMethod === 'delivery').length;
+  const pickupOrders      = completed.filter(o => o.deliveryMethod === 'pickup').length;
+
+  const itemSales = {};
+  completed.forEach(order => {
+    order.items.forEach(item => {
+      const n = item.menuItem.name;
+      if (!itemSales[n]) itemSales[n] = { qty: 0, revenue: 0 };
+      itemSales[n].qty     += item.quantity;
+      itemSales[n].revenue += item.totalPrice;
+    });
+  });
+  const topItems = Object.entries(itemSales)
+    .sort((a, b) => b[1].qty - a[1].qty)
+    .slice(0, 5);
+
+  const statusCount = {};
+  orders.forEach(o => {
+    statusCount[o.status] = (statusCount[o.status] || 0) + 1;
+  });
+
+  document.getElementById('page-content').innerHTML = `
+
+    <!-- KPI Cards -->
+    <div class="grid grid-cols-2 md:grid-cols-4 gap-6 mb-10">
+      ${kpiCard('今日營業額', '$' + todayRevenue, '今日已完成訂單', 'bg-green-50 text-green-700')}
+      ${kpiCard('今日訂單', todayOrders.length + ' 單', '已完成', 'bg-blue-50 text-blue-700')}
+      ${kpiCard('總營業額', '$' + totalRevenue, '累計已完成訂單', 'bg-purple-50 text-purple-700')}
+      ${kpiCard('平均訂單金額', '$' + avgOrderValue, '已完成訂單平均', 'bg-orange-50 text-orange-700')}
+    </div>
+
+    <!-- Delivery Stats -->
+    <div class="grid grid-cols-2 md:grid-cols-4 gap-6 mb-10">
+      ${kpiCard('外送訂單', deliveryOrders + ' 單', '已完成外送', 'bg-indigo-50 text-indigo-700')}
+      ${kpiCard('自取訂單', pickupOrders + ' 單', '已完成自取', 'bg-teal-50 text-teal-700')}
+      ${kpiCard('外送費收入', '$' + totalDeliveryFees, '累計外送費', 'bg-pink-50 text-pink-700')}
+      ${kpiCard('外送比例', completed.length > 0 ? Math.round(deliveryOrders / completed.length * 100) + '%' : '0%', '外送佔總訂單', 'bg-yellow-50 text-yellow-700')}
+    </div>
+
+    <div class="grid grid-cols-1 lg:grid-cols-2 gap-8">
+
+      <div class="bg-white rounded-2xl p-6 border border-gray-200 shadow-sm">
+        <h2 class="text-lg font-bold mb-6">熱門菜品 (按銷量)</h2>
+        ${topItems.length === 0
+          ? `<p class="text-gray-400 text-center py-8">暫無數據</p>`
+          : `<div class="space-y-4">
+              ${topItems.map(([name, data], i) => `
+                <div class="flex items-center gap-4">
+                  <div class="w-7 h-7 rounded-full flex items-center justify-center text-xs font-bold ${i===0?'bg-yellow-100 text-yellow-700':i===1?'bg-gray-100 text-gray-600':i===2?'bg-orange-100 text-orange-700':'bg-gray-50 text-gray-400'}">${i+1}</div>
+                  <div class="flex-1">
+                    <div class="font-medium text-sm">${htmlEscape(name)}</div>
+                    <div class="w-full bg-gray-100 rounded-full h-1.5 mt-1">
+                      <div class="bg-[#2a2828] h-1.5 rounded-full" style="width: ${Math.min(100, (data.qty / (topItems[0]?.[1].qty||1)) * 100)}%"></div>
+                    </div>
+                  </div>
+                  <div class="text-right text-sm">
+                    <div class="font-bold">${data.qty} 份</div>
+                    <div class="text-gray-400 text-xs">$${data.revenue}</div>
+                  </div>
+                </div>`).join('')}
+            </div>`}
+      </div>
+
+      <div class="bg-white rounded-2xl p-6 border border-gray-200 shadow-sm">
+        <h2 class="text-lg font-bold mb-6">訂單狀態分佈</h2>
+        ${orders.length === 0
+          ? `<p class="text-gray-400 text-center py-8">暫無訂單</p>`
+          : `<div class="space-y-3">
+              ${Object.entries(statusCount).map(([status, count]) => `
+                <div class="flex items-center justify-between">
+                  <span class="text-sm text-gray-700">${getStatusText(status)}</span>
+                  <div class="flex items-center gap-3">
+                    <div class="w-32 bg-gray-100 rounded-full h-2">
+                      <div class="bg-[#2a2828] h-2 rounded-full" style="width: ${Math.min(100, (count / orders.length) * 100)}%"></div>
+                    </div>
+                    <span class="text-sm font-bold w-8 text-right">${count}</span>
+                  </div>
+                </div>`).join('')}
+            </div>`}
+      </div>
+
+    </div>
+
+    <!-- Recent Orders Table -->
+    <div class="bg-white rounded-2xl p-6 border border-gray-200 shadow-sm mt-8">
+      <h2 class="text-lg font-bold mb-6">最近訂單</h2>
+      ${orders.length === 0
+        ? `<p class="text-gray-400 text-center py-8">暫無訂單</p>`
+        : `<div class="overflow-x-auto">
+            <table class="w-full text-sm">
+              <thead>
+                <tr class="border-b border-gray-100 text-gray-500 text-left">
+                  <th class="pb-3 font-medium">訂單編號</th>
+                  <th class="pb-3 font-medium">顧客</th>
+                  <th class="pb-3 font-medium">方式</th>
+                  <th class="pb-3 font-medium">付款</th>
+                  <th class="pb-3 font-medium">小計</th>
+                  <th class="pb-3 font-medium">外送費</th>
+                  <th class="pb-3 font-medium">合計</th>
+                  <th class="pb-3 font-medium">狀態</th>
+                  <th class="pb-3 font-medium">時間</th>
+                </tr>
+              </thead>
+              <tbody class="divide-y divide-gray-50">
+                ${orders.slice(0, 20).map(order => {
+                  const fee = order.deliveryFee || 0;
+                  const sub = order.subtotal || (order.totalAmount - fee);
+                  return `
+                  <tr class="hover:bg-gray-50">
+                    <td class="py-3 font-mono font-medium">${htmlEscape(order.id)}</td>
+                    <td class="py-3">${htmlEscape(order.customerInfo.name)}</td>
+                    <td class="py-3">${order.deliveryMethod === 'pickup' ? '自取' : '外送'}</td>
+                    <td class="py-3">${order.paymentMethod === 'cash' ? '現金' : '線上'}</td>
+                    <td class="py-3">$${sub}</td>
+                    <td class="py-3 ${fee > 0 ? 'text-blue-600' : 'text-gray-300'}">${fee > 0 ? '$' + fee : '-'}</td>
+                    <td class="py-3 font-bold">$${order.totalAmount}</td>
+                    <td class="py-3">
+                      <span class="px-2 py-0.5 rounded-full text-xs font-medium ${statusBadgeClass(order.status)}">${getStatusText(order.status)}</span>
+                    </td>
+                    <td class="py-3 text-gray-400">${new Date(order.createdAt).toLocaleString()}</td>
+                  </tr>`;
+                }).join('')}
+              </tbody>
+            </table>
+          </div>`}
+    </div>`;
+}
+
+function kpiCard(title, value, sub, colorClass) {
+  return `
+    <div class="bg-white rounded-2xl p-6 border border-gray-200 shadow-sm">
+      <div class="text-sm text-gray-500 mb-2">${title}</div>
+      <div class="text-3xl font-bold mb-1 ${colorClass.split(' ')[1]}">${value}</div>
+      <div class="text-xs text-gray-400">${sub}</div>
+    </div>`;
+}
+
+function statusBadgeClass(status) {
+  const map = {
+    pending:    'bg-yellow-100 text-yellow-700',
+    accepted:   'bg-blue-100 text-blue-700',
+    cooking:    'bg-orange-100 text-orange-700',
+    delivering: 'bg-purple-100 text-purple-700',
+    ready:      'bg-green-100 text-green-700',
+    completed:  'bg-gray-100 text-gray-600',
+    cancelled:  'bg-red-100 text-red-600',
+  };
+  return map[status] || 'bg-gray-100 text-gray-600';
+}
+
+render();
+</script>
+</body>
+</html>

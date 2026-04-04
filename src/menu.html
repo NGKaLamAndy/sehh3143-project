@@ -1,0 +1,440 @@
+<!DOCTYPE html>
+<html lang="zh-HK">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>小島料理 – 菜單</title>
+  <!-- Tailwind CSS CDN for all utility styling -->
+  <script src="https://cdn.tailwindcss.com"></script>
+  <!-- Multi-language support -->
+  <script src="js/i18n.js"></script>
+  <!-- Shared menu data (DEFAULT_CATEGORIES, DEFAULT_MENU_ITEMS, DEFAULT_SETTINGS) -->
+  <script src="js/data.js"></script>
+  <!-- Shared state management (Store object, renderHeader, renderCartButton) -->
+  <script src="js/store.js"></script>
+  <style>
+    .scrollbar-hide::-webkit-scrollbar { display: none; }
+    .scrollbar-hide { -ms-overflow-style: none; scrollbar-width: none; }
+    /* fade-in animation for modal */
+    @keyframes fadeIn { from { opacity:0; transform:scale(0.96); } to { opacity:1; transform:scale(1); } }
+    .modal-anim { animation: fadeIn 0.18s ease; }
+  </style>
+</head>
+<body class="bg-[#f9f9f9] font-sans">
+
+  <!-- HEADER: injected by renderHeader() from store.js -->
+  <div id="header-root"></div>
+
+  <main class="max-w-7xl mx-auto px-8 py-8 pb-36">
+
+    <!-- Store Status Banner -->
+    <div id="status-banner" class="bg-white rounded-2xl p-4 mb-6 shadow-sm border border-gray-100 flex items-center justify-between"></div>
+
+    <!-- Today's Specials Section -->
+    <div id="specials-section"></div>
+
+    <!-- Active Orders (orders that are not yet completed/cancelled) -->
+    <div id="active-orders-section"></div>
+
+    <!-- History Orders (completed / cancelled) -->
+    <div id="history-orders-section"></div>
+
+    <!-- Search Bar -->
+    <div class="relative mb-6">
+      <svg class="absolute left-4 top-1/2 -translate-y-1/2 text-gray-400" xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>
+      <input id="search-input" type="text"
+        class="w-full bg-white border border-gray-200 rounded-full py-3 pl-12 pr-4 focus:outline-none focus:ring-2 focus:ring-orange-500 shadow-sm" />
+    </div>
+
+    <!-- Category Filter Buttons -->
+    <div id="category-filters" class="flex gap-3 mb-8 overflow-x-auto pb-2 scrollbar-hide"></div>
+
+    <!-- Menu Item Grid (rendered dynamically per category) -->
+    <div id="menu-grid" class="space-y-8"></div>
+
+  </main>
+
+  <!-- Floating cart button -->
+  <div id="cart-btn-root"></div>
+
+  <!-- Item Customization Modal (hidden by default) -->
+  <div id="item-modal" class="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4 backdrop-blur-sm hidden">
+    <div id="item-modal-content" class="bg-white rounded-3xl w-full max-w-md overflow-hidden shadow-2xl modal-anim flex flex-col max-h-[90vh]"></div>
+  </div>
+
+<script>
+// ===================================================================
+// menu.html  —  Customer Menu Page
+// -------------------------------------------------------------------
+// STATE VARIABLES (live only during this page visit)
+// ===================================================================
+let activeCategory = 'all';   // currently selected category filter
+let searchQuery    = '';       // current search input text
+let selectedItem   = null;    // item object being shown in modal
+let showHistory    = false;   // toggle for history orders section
+let modalQty       = 1;       // quantity chosen in modal
+let modalCustom    = {};      // chosen customizations in modal  { custId: choiceId }
+let modalNotes     = '';      // special instructions text in modal
+
+// ===================================================================
+// INIT  —  runs when the page first loads
+// ===================================================================
+function init() {
+  document.getElementById('header-root').innerHTML = renderHeader();
+  renderStatusBanner();
+  renderSpecials();
+  renderOrderBanners();
+  renderCategoryFilters();
+  renderMenuGrid();
+  renderCartBtnRoot();
+
+  // Search input listener — re-render grid on every keystroke
+  document.getElementById('search-input').addEventListener('input', function(e) {
+    searchQuery = e.target.value;
+    renderMenuGrid();
+  });
+}
+
+// ===================================================================
+// TODAY'S SPECIALS  —  horizontal strip at top of menu
+// ===================================================================
+function renderSpecials() {
+  const specialIds = Store.getSpecials();
+  const allItems   = Store.getMenuItems();
+  const settings   = Store.getSettings();
+  const specials   = allItems.filter(item => specialIds.includes(item.id) && item.isAvailable !== false);
+
+  const el = document.getElementById('specials-section');
+  if (specials.length === 0) { el.innerHTML = ''; return; }
+
+  el.innerHTML = `
+    <div class="mb-8">
+      <div class="flex items-center gap-2 mb-4">
+        <span class="text-xl">⭐</span>
+        <h2 class="text-xl font-bold text-gray-800">${t('todaysSpecials')}</h2>
+      </div>
+      <div class="flex gap-4 overflow-x-auto pb-2 scrollbar-hide">
+        ${specials.map(item => {
+          const canOrder = settings.isOpen;
+          return `
+          <div onclick="${canOrder ? `openModal('${item.id}')` : ''}"
+            class="shrink-0 w-52 bg-white rounded-2xl shadow-sm border-2 border-orange-200 overflow-hidden ${canOrder ? 'cursor-pointer hover:shadow-md' : 'opacity-75'} transition-shadow">
+            ${item.image ? `<img src="${htmlEscape(item.image)}" alt="${htmlEscape(item.name)}" class="w-full h-32 object-cover" referrerpolicy="no-referrer" />` : '<div class="w-full h-32 bg-gray-100"></div>'}
+            <div class="p-3">
+              <div class="flex items-start justify-between gap-1 mb-1">
+                <span class="text-sm font-bold text-gray-900 leading-tight">${htmlEscape(item.name)}</span>
+                <span class="shrink-0 text-[10px] bg-orange-500 text-white px-1.5 py-0.5 rounded-full font-bold">${t('special')}</span>
+              </div>
+              <p class="text-xs text-gray-500 line-clamp-2 mb-2">${htmlEscape(item.description || '')}</p>
+              <span class="text-base font-bold text-orange-600">$${item.price}</span>
+            </div>
+          </div>`;
+        }).join('')}
+      </div>
+    </div>`;
+}
+
+// ===================================================================
+// STATUS BANNER  —  shows "open" or "closed" + business hours
+// ===================================================================
+function renderStatusBanner() {
+  const s = Store.getSettings();
+  document.getElementById('status-banner').innerHTML = `
+    <div class="flex items-center gap-3">
+      <span class="relative flex h-3 w-3">
+        ${s.isOpen ? '<span class="animate-ping absolute inline-flex h-full w-full rounded-full bg-green-400 opacity-75"></span>' : ''}
+        <span class="relative inline-flex rounded-full h-3 w-3 ${s.isOpen ? 'bg-green-500' : 'bg-red-500'}"></span>
+      </span>
+      <span class="font-bold text-gray-800">${s.isOpen ? '營業中' : '休息中 (暫停接單)'}</span>
+    </div>
+    <div class="flex items-center gap-2 text-gray-500 text-sm font-medium">
+      <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"></circle><polyline points="12 6 12 12 16 14"></polyline></svg>
+      <span>${s.operatingHours}</span>
+    </div>`;
+}
+
+// ===================================================================
+// ORDER BANNERS  —  active orders + history orders
+// ===================================================================
+function renderOrderBanners() {
+  const orders = Store.getOrders();
+  const activeOrders  = orders.filter(o => !['completed','cancelled'].includes(o.status));
+  const finishedOrders = orders.filter(o => ['completed','cancelled'].includes(o.status));
+
+  // Active orders
+  let activeHtml = '';
+  if (activeOrders.length > 0) {
+    activeHtml = `<div class="mb-8 space-y-4">
+      <h2 class="text-xl font-bold text-gray-800">您的活動訂單</h2>
+      ${activeOrders.map(order => `
+        <a href="order-tracking.html?id=${order.id}"
+           class="bg-white border border-blue-200 p-5 rounded-2xl flex justify-between items-center shadow-sm hover:shadow-md transition-shadow no-underline text-black">
+          <div>
+            <div class="font-bold text-gray-900 text-lg mb-1">訂單 #${order.id}</div>
+            <div class="flex items-center gap-2">
+              <span class="relative flex h-3 w-3"><span class="animate-ping absolute inline-flex h-full w-full rounded-full bg-blue-400 opacity-75"></span><span class="relative inline-flex rounded-full h-3 w-3 bg-blue-500"></span></span>
+              <span class="text-sm font-medium text-blue-600">狀態: ${getStatusText(order.status)}</span>
+            </div>
+          </div>
+          <div class="w-10 h-10 rounded-full bg-blue-50 flex items-center justify-center text-blue-600">›</div>
+        </a>`).join('')}
+    </div>`;
+  }
+  document.getElementById('active-orders-section').innerHTML = activeHtml;
+
+  // History orders (collapsible)
+  let historyHtml = '';
+  if (finishedOrders.length > 0) {
+    historyHtml = `<div class="mb-8 space-y-4">
+      <button onclick="toggleHistory()" class="w-full flex items-center justify-between text-xl font-bold text-gray-800 bg-white p-4 rounded-2xl shadow-sm border border-gray-100 hover:bg-gray-50">
+        <div class="flex items-center gap-2">
+          <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="12 8 12 12 14 14"></polyline><path d="M3.05 11a9 9 0 1 1 .5 4"></path><polyline points="3 15 3.05 11 7 11"></polyline></svg>
+          歷史訂單 (${finishedOrders.length})
+        </div>
+        <span>${showHistory ? '▲' : '▼'}</span>
+      </button>
+      ${showHistory ? `<div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
+        ${finishedOrders.map(order => `
+          <a href="order-tracking.html?id=${order.id}"
+             class="bg-gray-50 border border-gray-200 p-4 rounded-2xl flex justify-between items-center hover:bg-gray-100 no-underline text-black">
+            <div>
+              <div class="font-bold text-gray-700 mb-1">訂單 #${order.id}</div>
+              <div class="text-sm text-gray-500">${new Date(order.createdAt).toLocaleDateString()} · $${order.totalAmount}</div>
+            </div>
+            <div class="text-sm font-medium px-3 py-1 rounded-full ${order.status === 'completed' ? 'bg-green-100 text-green-700' : 'bg-red-100 text-red-700'}">
+              ${getStatusText(order.status)}
+            </div>
+          </a>`).join('')}
+      </div>` : ''}
+    </div>`;
+  }
+  document.getElementById('history-orders-section').innerHTML = historyHtml;
+}
+
+function toggleHistory() {
+  showHistory = !showHistory;
+  renderOrderBanners();
+}
+
+// ===================================================================
+// CATEGORY FILTERS  —  "全部" + one button per category
+// ===================================================================
+function renderCategoryFilters() {
+  const categories = Store.getCategories();
+  let html = `<button onclick="setCategory('all')"
+    class="px-4 py-2 rounded-full text-sm whitespace-nowrap transition-colors ${activeCategory === 'all' ? 'bg-orange-500 text-white' : 'bg-white border border-gray-200 text-gray-700 hover:bg-gray-50'}">${t('category.all')}</button>`;
+  categories.forEach(cat => {
+    html += `<button onclick="setCategory('${cat.id}')"
+      class="px-4 py-2 rounded-full text-sm whitespace-nowrap transition-colors ${activeCategory === cat.id ? 'bg-orange-500 text-white' : 'bg-white border border-gray-200 text-gray-700 hover:bg-gray-50'}">${cat.name}</button>`;
+  });
+  document.getElementById('category-filters').innerHTML = html;
+}
+
+function setCategory(id) {
+  activeCategory = id;
+  renderCategoryFilters();
+  renderMenuGrid();
+}
+
+// ===================================================================
+// MENU GRID  —  groups items by category, filters by search query
+// ===================================================================
+function renderMenuGrid() {
+  const categories = Store.getCategories();
+  const items      = Store.getMenuItems();
+  const settings   = Store.getSettings();
+  const q          = searchQuery.toLowerCase();
+  const grid       = document.getElementById('menu-grid');
+
+  let html = '';
+  const visibleCats = categories.filter(c => activeCategory === 'all' || activeCategory === c.id);
+
+  visibleCats.forEach(cat => {
+    const catItems = items.filter(item => {
+      const inCat = item.categoryId === cat.id;
+      const matchSearch = item.name.toLowerCase().includes(q) ||
+                          (item.description || '').toLowerCase().includes(q);
+      return inCat && matchSearch;
+    });
+    if (catItems.length === 0) return;
+
+    html += `<div>
+      <h2 class="text-xl font-bold mb-4 text-gray-800">${cat.name}</h2>
+      <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+        ${catItems.map(item => renderItemCard(item, settings)).join('')}
+      </div>
+    </div>`;
+  });
+
+  // No results message
+  const totalVisible = items.filter(item => {
+    const inCat = activeCategory === 'all' || item.categoryId === activeCategory;
+    const matchSearch = item.name.toLowerCase().includes(q) || (item.description||'').toLowerCase().includes(q);
+    return inCat && matchSearch;
+  }).length;
+
+  if (totalVisible === 0 && q) {
+    html = `<div class="text-center py-12 text-gray-500">找不到符合「${searchQuery}」的餐點</div>`;
+  }
+
+  grid.innerHTML = html;
+}
+
+// Render a single item card
+function renderItemCard(item, settings) {
+  const isAvailable = item.isAvailable !== false;
+  const canOrder    = settings.isOpen && isAvailable;
+  const clickAttr   = canOrder ? `onclick="openModal('${item.id}')"` : '';
+
+  return `
+  <div class="bg-white p-4 rounded-2xl shadow-sm border border-gray-100 flex gap-4 transition-shadow ${canOrder ? 'hover:shadow-md cursor-pointer' : 'opacity-75 cursor-not-allowed'}" ${clickAttr}>
+    ${item.image ? `
+      <div class="relative shrink-0">
+        <img src="${htmlEscape(item.image)}" alt="${htmlEscape(item.name)}" class="w-28 h-28 object-cover rounded-xl ${!canOrder ? 'grayscale' : ''}" referrerpolicy="no-referrer" />
+        ${!isAvailable ? `<div class="absolute inset-0 bg-black/50 rounded-xl flex items-center justify-center"><span class="text-white font-bold text-sm bg-black/50 px-2 py-1 rounded">${t('soldOut')}</span></div>` : ''}
+      </div>` : ''}
+    <div class="flex-1 flex flex-col justify-between py-1">
+      <div>
+        <div class="flex items-center gap-2 mb-1">
+          <h3 class="text-lg font-bold text-gray-900 leading-tight">${htmlEscape(item.name)}</h3>
+          ${(item.tags||[]).map(tag => `<span class="px-2 py-0.5 bg-orange-100 text-orange-700 text-[10px] rounded-full font-medium">${htmlEscape(tag)}</span>`).join('')}
+        </div>
+        <p class="text-sm text-gray-500 line-clamp-2">${htmlEscape(item.description || '')}</p>
+      </div>
+      <div class="flex items-center justify-between mt-2">
+        <span class="text-lg font-bold text-gray-900">$${item.price}</span>
+        <button onclick="event.stopPropagation(); ${canOrder ? `openModal('${item.id}')` : ''}"
+          ${!canOrder ? 'disabled' : ''}
+          class="w-8 h-8 rounded-full flex items-center justify-center transition-colors ${canOrder ? 'bg-orange-500 text-white hover:bg-orange-600' : 'bg-gray-200 text-gray-400 cursor-not-allowed'}">
+          <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg>
+        </button>
+      </div>
+    </div>
+  </div>`;
+}
+
+// ===================================================================
+// MODAL  —  item customization + add to cart
+// ===================================================================
+function openModal(itemId) {
+  const items = Store.getMenuItems();
+  selectedItem = items.find(i => i.id === itemId);
+  if (!selectedItem) return;
+
+  // Reset modal state for this item
+  modalQty    = 1;
+  modalNotes  = '';
+  modalCustom = {};
+  (selectedItem.customizations || []).forEach(cust => {
+    if (cust.choices.length > 0) {
+      modalCustom[cust.id] = cust.choices[0].id; // default = first choice
+    }
+  });
+
+  renderModal();
+  document.getElementById('item-modal').classList.remove('hidden');
+}
+
+function closeModal() {
+  document.getElementById('item-modal').classList.add('hidden');
+  selectedItem = null;
+}
+
+function renderModal() {
+  if (!selectedItem) return;
+
+  // Calculate extra price from selected options
+  let extra = 0;
+  (selectedItem.customizations || []).forEach(cust => {
+    const choiceId = modalCustom[cust.id];
+    const choice = (cust.choices || []).find(c => c.id === choiceId);
+    if (choice) extra += choice.price;
+  });
+  const totalPrice = (selectedItem.price + extra) * modalQty;
+
+  // Build customization radio groups
+  let custHtml = (selectedItem.customizations || []).map(cust => `
+    <div class="mb-6">
+      <h3 class="font-bold mb-3">${cust.name}</h3>
+      <div class="space-y-2">
+        ${cust.choices.map(choice => `
+          <label class="flex items-center justify-between p-3 border border-gray-200 rounded-xl cursor-pointer hover:bg-gray-50">
+            <div class="flex items-center gap-3">
+              <input type="radio" name="${cust.id}" value="${choice.id}"
+                ${modalCustom[cust.id] === choice.id ? 'checked' : ''}
+                onchange="setCustom('${cust.id}', '${choice.id}')"
+                class="w-4 h-4 accent-orange-500" />
+              <span class="text-sm font-medium">${choice.name}</span>
+            </div>
+            ${choice.price > 0 ? `<span class="text-sm text-gray-500">+$${choice.price}</span>` : ''}
+          </label>`).join('')}
+      </div>
+    </div>`).join('');
+
+  document.getElementById('item-modal-content').innerHTML = `
+    <div class="relative h-48 shrink-0">
+      ${selectedItem.image
+        ? `<img src="${htmlEscape(selectedItem.image)}" alt="${htmlEscape(selectedItem.name)}" class="w-full h-full object-cover" referrerpolicy="no-referrer" />`
+        : '<div class="w-full h-full bg-gray-200"></div>'}
+      <button onclick="closeModal()" class="absolute top-4 right-4 p-2 bg-white/80 hover:bg-white rounded-full shadow-sm">✕</button>
+    </div>
+    <div class="p-6 overflow-y-auto flex-1">
+      <h2 class="text-2xl font-bold mb-2">${htmlEscape(selectedItem.name)}</h2>
+      <p class="text-gray-500 mb-6">${htmlEscape(selectedItem.description || '')}</p>
+      ${custHtml}
+      <div class="mb-6">
+        <h3 class="font-bold mb-3">${t('specialReq')}</h3>
+        <textarea oninput="modalNotes=this.value" placeholder="${t('specialReqPlaceholder')}"
+          class="w-full border border-gray-200 rounded-xl p-3 focus:outline-none focus:ring-2 focus:ring-orange-500 resize-none h-24 text-sm">${htmlEscape(modalNotes)}</textarea>
+      </div>
+      <div class="flex items-center justify-between mt-8">
+        <span class="font-bold">${t('qty')}</span>
+        <div class="flex items-center gap-4 bg-gray-100 rounded-full p-1">
+          <button onclick="changeQty(-1)" class="w-8 h-8 rounded-full bg-white shadow-sm flex items-center justify-center text-gray-600 hover:text-black">−</button>
+          <span id="modal-qty" class="w-4 text-center font-bold">${modalQty}</span>
+          <button onclick="changeQty(1)" class="w-8 h-8 rounded-full bg-white shadow-sm flex items-center justify-center text-gray-600 hover:text-black">+</button>
+        </div>
+      </div>
+    </div>
+    <div class="p-6 border-t border-gray-100 bg-white shrink-0">
+      <button onclick="addToCartFromModal()"
+        class="w-full bg-orange-500 text-white py-4 rounded-xl font-bold flex justify-between items-center px-6 hover:bg-orange-600 shadow-lg">
+        <span>${t('addToCart')}</span>
+        <span id="modal-total">$${totalPrice}</span>
+      </button>
+    </div>`;
+}
+
+function setCustom(custId, choiceId) {
+  modalCustom[custId] = choiceId;
+  renderModal();
+}
+
+function changeQty(delta) {
+  modalQty = Math.max(1, modalQty + delta);
+  renderModal();
+}
+
+function addToCartFromModal() {
+  if (!selectedItem) return;
+  Store.addToCart(selectedItem, modalQty, modalCustom, modalNotes);
+  closeModal();
+  renderCartBtnRoot();
+}
+
+function renderCartBtnRoot() {
+  document.getElementById('cart-btn-root').innerHTML = renderCartButton();
+}
+
+// Close modal when clicking the backdrop
+document.getElementById('item-modal').addEventListener('click', function(e) {
+  if (e.target === this) closeModal();
+});
+
+// ===================================================================
+// BOOT
+// ===================================================================
+init();
+</script>
+</body>
+</html>
